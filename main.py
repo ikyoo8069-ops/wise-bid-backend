@@ -794,6 +794,161 @@ class CompanyProfile(BaseModel):
     licenses: List[str] = []  # 보유 면허
     experiences: List[str] = []  # 실적 분야
 
+# ============================================
+# 샘플 회사 프로필 (테스트/데모용)
+# ============================================
+SAMPLE_PROFILES = {
+    "도로포장전문": CompanyProfile(
+        company_name="(주)한길도로",
+        business_type="전문건설",
+        work_types=["도로", "포장", "아스팔트", "아스콘"],
+        regions=["서울", "경기", "인천"],
+        min_price=50000000,      # 5천만원
+        max_price=2000000000,    # 20억
+        licenses=["도로포장공사업", "비계구조물해체공사업"],
+        experiences=["도로포장 50건", "아스팔트포장 30건", "보도블럭 20건"]
+    ),
+    "종합건설중견": CompanyProfile(
+        company_name="대한종합건설(주)",
+        business_type="종합건설",
+        work_types=["건축", "토목", "도로", "상하수도"],
+        regions=["서울", "경기", "인천", "충남", "충북"],
+        min_price=500000000,     # 5억
+        max_price=50000000000,   # 500억
+        licenses=["토목건축공사업", "토목공사업", "건축공사업"],
+        experiences=["공공건축 30건", "도로공사 25건", "하수관로 15건"]
+    ),
+    "전기설비전문": CompanyProfile(
+        company_name="(주)밝은전기",
+        business_type="전문건설",
+        work_types=["전기", "통신", "소방", "설비"],
+        regions=["서울", "경기"],
+        min_price=30000000,      # 3천만원
+        max_price=1000000000,    # 10억
+        licenses=["전기공사업", "정보통신공사업", "소방시설공사업"],
+        experiences=["전기설비 100건", "통신공사 50건", "소방설비 30건"]
+    )
+}
+
+# ============================================
+# 샘플 프로필 조회 API
+# ============================================
+@app.get("/api/sample-profiles")
+async def get_sample_profiles():
+    """샘플 회사 프로필 목록"""
+    return {
+        "success": True,
+        "profiles": {
+            name: {
+                "company_name": profile.company_name,
+                "business_type": profile.business_type,
+                "work_types": profile.work_types,
+                "regions": profile.regions,
+                "min_price": profile.min_price,
+                "max_price": profile.max_price,
+                "min_price_formatted": f"{profile.min_price:,}원",
+                "max_price_formatted": f"{profile.max_price:,}원",
+                "licenses": profile.licenses,
+                "experiences": profile.experiences
+            }
+            for name, profile in SAMPLE_PROFILES.items()
+        }
+    }
+
+@app.get("/api/sample-profiles/{profile_name}")
+async def get_sample_profile(profile_name: str):
+    """특정 샘플 프로필 조회"""
+    if profile_name not in SAMPLE_PROFILES:
+        raise HTTPException(status_code=404, detail=f"프로필 '{profile_name}' 없음")
+    
+    profile = SAMPLE_PROFILES[profile_name]
+    return {
+        "success": True,
+        "name": profile_name,
+        "profile": {
+            "company_name": profile.company_name,
+            "business_type": profile.business_type,
+            "work_types": profile.work_types,
+            "regions": profile.regions,
+            "min_price": profile.min_price,
+            "max_price": profile.max_price,
+            "licenses": profile.licenses,
+            "experiences": profile.experiences
+        }
+    }
+
+# ============================================
+# 샘플 프로필로 공고 매칭 (원클릭)
+# ============================================
+@app.get("/api/quick-match/{profile_name}")
+async def quick_match(profile_name: str, keyword: str = "", bid_type: str = "공사", request: Request = None):
+    """샘플 프로필로 즉시 매칭"""
+    if profile_name not in SAMPLE_PROFILES:
+        raise HTTPException(status_code=404, detail=f"프로필 '{profile_name}' 없음")
+    
+    profile = SAMPLE_PROFILES[profile_name]
+    
+    # 키워드 없으면 주력 공종 첫 번째 사용
+    search_keyword = keyword if keyword else profile.work_types[0] if profile.work_types else ""
+    
+    # 공고 조회
+    bids = await fetch_bid_announcements(search_keyword, bid_type, 30)
+    
+    # 매칭 필터링
+    matched = []
+    for bid in bids:
+        score = 0
+        reasons = []
+        
+        # 금액 필터
+        price = bid.get("base_price", 0) or bid.get("estimated_price", 0)
+        if price:
+            price = int(price)
+            if profile.min_price <= price <= profile.max_price:
+                score += 30
+                reasons.append(f"금액 적합 ({price:,}원)")
+            else:
+                continue
+        
+        # 공종 매칭
+        bid_name = bid.get("bid_name", "")
+        for work_type in profile.work_types:
+            if work_type in bid_name:
+                score += 25
+                reasons.append(f"공종: {work_type}")
+                break
+        
+        # 지역 매칭
+        region = bid.get("region", "") or bid.get("agency", "")
+        for r in profile.regions:
+            if r in region:
+                score += 20
+                reasons.append(f"지역: {r}")
+                break
+        
+        bid["match_score"] = score
+        bid["match_reasons"] = reasons
+        
+        if score >= 25:
+            matched.append(bid)
+    
+    matched.sort(key=lambda x: x.get("match_score", 0), reverse=True)
+    
+    return {
+        "success": True,
+        "profile_name": profile_name,
+        "company": profile.company_name,
+        "search_keyword": search_keyword,
+        "total_found": len(bids),
+        "matched_count": len(matched),
+        "matched": matched[:20],  # 상위 20개
+        "n2b": {
+            "not": f"모든 공고가 {profile.company_name}에 적합한 게 아닙니다",
+            "but": f"{len(matched)}건이 매칭되었습니다",
+            "because": f"금액({profile.min_price:,}~{profile.max_price:,}원), 공종({', '.join(profile.work_types[:2])}), 지역({', '.join(profile.regions[:2])}) 조건 충족"
+        }
+    }
+
 class BidSearchRequest(BaseModel):
     """입찰공고 검색 요청"""
     keyword: str = ""
