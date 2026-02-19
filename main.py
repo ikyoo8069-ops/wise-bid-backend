@@ -1,9 +1,11 @@
 # ============================================
-# 슬기로운 입찰생활 - Backend v3.4
+# 슬기로운 입찰생활 - Backend v3.5
 # + 조달청 가격정보 API 연동
 # + 공종별 비율 DB
 # + 개략원가 자동 산출
 # + N2B 참여 판정
+# + 입찰공고 조회/매칭 (NEW!)
+# + 회사 프로필 매칭 (NEW!)
 # ============================================
 
 from fastapi import FastAPI, HTTPException, Request
@@ -19,7 +21,7 @@ import asyncio
 import re
 from datetime import date, datetime
 
-app = FastAPI(title="N2B Backend v3.4", description="wise-bid + 가격정보API + 개략원가산출")
+app = FastAPI(title="N2B Backend v3.5", description="wise-bid + 가격정보API + 개략원가산출 + 공고매칭")
 
 app.add_middleware(
     CORSMiddleware,
@@ -666,6 +668,381 @@ async def get_usage(request: Request):
             "tier": "premium" if is_premium else "normal"
         }
     }
+
+# ============================================
+# 입찰공고 조회 (나라장터 API)
+# ============================================
+async def fetch_bid_announcements(keyword: str, bid_type: str = "공사", count: int = 20) -> list:
+    """조달청 입찰공고 조회"""
+    type_endpoints = {
+        "물품": "getBidPblancListInfoThngPPSSrch",
+        "공사": "getBidPblancListInfoCnstwkPPSSrch", 
+        "용역": "getBidPblancListInfoServcPPSSrch",
+        "외자": "getBidPblancListInfoFrgcptPPSSrch"
+    }
+    
+    endpoint = type_endpoints.get(bid_type, "getBidPblancListInfoCnstwkPPSSrch")
+    url = f"https://apis.data.go.kr/1230000/BidPublicInfoService04/{endpoint}"
+    
+    params = {
+        "ServiceKey": PUBLIC_DATA_API_KEY,
+        "pageNo": 1,
+        "numOfRows": count,
+        "type": "json",
+        "bidNm": keyword,
+        "inqryDiv": "1",
+        "inqryBgnDt": (datetime.now().replace(day=1)).strftime("%Y%m%d") + "0000",
+        "inqryEndDt": datetime.now().strftime("%Y%m%d") + "2359"
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+            items = data.get("response", {}).get("body", {}).get("items", [])
+            if not items:
+                return []
+            bids = []
+            for item in items:
+                bid = {
+                    "bid_no": item.get("bidNtceNo", ""),
+                    "bid_name": item.get("bidNtceNm", ""),
+                    "agency": item.get("ntceInsttNm", ""),
+                    "demand_agency": item.get("dminsttNm", ""),
+                    "estimated_price": item.get("presmptPrce", 0),
+                    "base_price": item.get("asignBdgtAmt", 0),
+                    "bid_method": item.get("bidMethdNm", ""),
+                    "contract_method": item.get("cntrctCnclsMthdNm", ""),
+                    "deadline": item.get("bidClseDt", ""),
+                    "open_date": item.get("opengDt", ""),
+                    "region": item.get("ntceInsttOfclAddr", ""),
+                    "url": item.get("bidNtceDtlUrl", ""),
+                    "bid_type": bid_type
+                }
+                bids.append(bid)
+            return bids
+    except Exception as e:
+        print(f"[조달청 입찰공고 오류] {e}")
+        return []
+
+# ============================================
+# 낙찰정보 조회
+# ============================================
+async def fetch_winning_bids(keyword: str, bid_type: str = "공사", count: int = 20) -> list:
+    """낙찰정보 조회 - 낙찰가율 분석용"""
+    type_endpoints = {
+        "물품": "getOpengResultListInfoThngPPSSrch",
+        "공사": "getOpengResultListInfoCnstwkPPSSrch",
+        "용역": "getOpengResultListInfoServcPPSSrch",
+        "외자": "getOpengResultListInfoFrgcptPPSSrch"
+    }
+    
+    endpoint = type_endpoints.get(bid_type, "getOpengResultListInfoCnstwkPPSSrch")
+    url = f"https://apis.data.go.kr/1230000/ScsbidInfoService/{endpoint}"
+    
+    params = {
+        "ServiceKey": PUBLIC_DATA_API_KEY,
+        "pageNo": 1,
+        "numOfRows": count,
+        "type": "json",
+        "bidNm": keyword,
+        "inqryDiv": "1"
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+            items = data.get("response", {}).get("body", {}).get("items", [])
+            if not items:
+                return []
+            results = []
+            for item in items:
+                estimated = float(item.get("presmptPrce", 0) or 0)
+                winning = float(item.get("sucsfbidAmt", 0) or 0)
+                rate = (winning / estimated * 100) if estimated > 0 else 0
+                result = {
+                    "bid_no": item.get("bidNtceNo", ""),
+                    "bid_name": item.get("bidNtceNm", ""),
+                    "agency": item.get("ntceInsttNm", ""),
+                    "estimated_price": estimated,
+                    "winning_price": winning,
+                    "winning_rate": round(rate, 2),
+                    "winner": item.get("sucsfbidCorpNm", ""),
+                    "open_date": item.get("opengDt", ""),
+                    "participant_count": item.get("prtcptCnum", 0)
+                }
+                results.append(result)
+            return results
+    except Exception as e:
+        print(f"[조달청 낙찰정보 오류] {e}")
+        return []
+
+# ============================================
+# 회사 프로필 모델
+# ============================================
+class CompanyProfile(BaseModel):
+    """회사 프로필"""
+    company_name: str = ""
+    business_type: str = "전문건설"  # 종합건설, 전문건설
+    work_types: List[str] = []  # 주력 공종
+    regions: List[str] = []  # 주력 지역
+    min_price: int = 0  # 최소 희망 금액
+    max_price: int = 10000000000  # 최대 희망 금액
+    licenses: List[str] = []  # 보유 면허
+    experiences: List[str] = []  # 실적 분야
+
+class BidSearchRequest(BaseModel):
+    """입찰공고 검색 요청"""
+    keyword: str = ""
+    bid_type: str = "공사"
+    count: int = 20
+    profile: Optional[CompanyProfile] = None
+
+# ============================================
+# 입찰공고 검색 API
+# ============================================
+@app.post("/api/bid-search")
+async def search_bids(req: BidSearchRequest, request: Request):
+    """입찰공고 검색"""
+    ip = get_client_ip(request)
+    is_premium = request.headers.get("x-premium-key") == PREMIUM_KEY
+    check_rate_limit(ip, "bid", is_premium)
+    
+    bids = await fetch_bid_announcements(req.keyword, req.bid_type, req.count)
+    
+    return {
+        "success": True,
+        "count": len(bids),
+        "keyword": req.keyword,
+        "bid_type": req.bid_type,
+        "bids": bids
+    }
+
+@app.get("/api/bid-search")
+async def search_bids_get(
+    keyword: str = "",
+    bid_type: str = "공사",
+    count: int = 20,
+    request: Request = None
+):
+    """입찰공고 검색 (GET)"""
+    bids = await fetch_bid_announcements(keyword, bid_type, count)
+    
+    return {
+        "success": True,
+        "count": len(bids),
+        "keyword": keyword,
+        "bid_type": bid_type,
+        "bids": bids
+    }
+
+# ============================================
+# 회사-공고 매칭 API
+# ============================================
+@app.post("/api/bid-match")
+async def match_bids(req: BidSearchRequest, request: Request):
+    """회사 프로필 기반 공고 매칭"""
+    ip = get_client_ip(request)
+    is_premium = request.headers.get("x-premium-key") == PREMIUM_KEY
+    check_rate_limit(ip, "bid", is_premium)
+    
+    # 공고 조회
+    bids = await fetch_bid_announcements(req.keyword, req.bid_type, req.count)
+    
+    if not req.profile:
+        return {
+            "success": True,
+            "matched": bids,
+            "total": len(bids),
+            "filtered": 0,
+            "message": "프로필 없음 - 전체 공고 반환"
+        }
+    
+    # 매칭 필터링
+    matched = []
+    for bid in bids:
+        score = 0
+        reasons = []
+        
+        # 금액 필터
+        price = bid.get("base_price", 0) or bid.get("estimated_price", 0)
+        if price:
+            price = int(price)
+            if req.profile.min_price <= price <= req.profile.max_price:
+                score += 30
+                reasons.append("금액 적합")
+            else:
+                continue  # 금액 범위 벗어나면 제외
+        
+        # 공종 매칭
+        bid_name = bid.get("bid_name", "")
+        for work_type in req.profile.work_types:
+            if work_type in bid_name:
+                score += 25
+                reasons.append(f"공종 매칭: {work_type}")
+                break
+        
+        # 지역 매칭
+        region = bid.get("region", "") or bid.get("agency", "")
+        for r in req.profile.regions:
+            if r in region:
+                score += 20
+                reasons.append(f"지역 매칭: {r}")
+                break
+        
+        # 매칭 점수 추가
+        bid["match_score"] = score
+        bid["match_reasons"] = reasons
+        
+        if score >= 25:  # 최소 25점 이상
+            matched.append(bid)
+    
+    # 점수순 정렬
+    matched.sort(key=lambda x: x.get("match_score", 0), reverse=True)
+    
+    return {
+        "success": True,
+        "matched": matched,
+        "total": len(bids),
+        "filtered": len(matched),
+        "profile": {
+            "company": req.profile.company_name,
+            "work_types": req.profile.work_types,
+            "regions": req.profile.regions,
+            "price_range": f"{req.profile.min_price:,} ~ {req.profile.max_price:,}"
+        }
+    }
+
+# ============================================
+# 낙찰가율 분석 API
+# ============================================
+@app.get("/api/winning-rate")
+async def get_winning_rate(
+    keyword: str = "",
+    bid_type: str = "공사",
+    count: int = 30,
+    request: Request = None
+):
+    """낙찰가율 분석 - 평균 낙찰가율 제공"""
+    results = await fetch_winning_bids(keyword, bid_type, count)
+    
+    if not results:
+        return {
+            "success": False,
+            "message": "낙찰 데이터 없음",
+            "avg_rate": 87.5,  # 기본값
+            "data": []
+        }
+    
+    rates = [r["winning_rate"] for r in results if r["winning_rate"] > 0]
+    avg_rate = sum(rates) / len(rates) if rates else 87.5
+    
+    return {
+        "success": True,
+        "keyword": keyword,
+        "count": len(results),
+        "avg_rate": round(avg_rate, 2),
+        "min_rate": round(min(rates), 2) if rates else 0,
+        "max_rate": round(max(rates), 2) if rates else 0,
+        "recommendation": f"투찰가율 {avg_rate - 0.5:.1f}% ~ {avg_rate + 0.5:.1f}% 권장",
+        "data": results[:10]  # 상위 10개만
+    }
+
+# ============================================
+# 통합 분석 API (공고 + 원가 + N2B)
+# ============================================
+@app.post("/api/full-analysis")
+async def full_analysis(
+    bid_no: str,
+    base_price: int,
+    work_type: str = "기타",
+    material_discount: float = 0,
+    labor_discount: float = 0,
+    equipment_discount: float = 0,
+    min_profit_rate: float = 5.0,
+    request: Request = None
+):
+    """통합 분석: 공고 + 원가분석 + N2B 판정"""
+    
+    # 1. 원가분석
+    ratios = COST_RATIOS.get(work_type, COST_RATIOS["기타"])
+    
+    direct_cost = int(base_price * 0.74)
+    material = int(direct_cost * ratios["재료비"] / 100)
+    labor = int(direct_cost * ratios["노무비"] / 100)
+    equipment = int(direct_cost * ratios["경비"] / 100)
+    
+    # 절감 적용
+    actual_material = int(material * (1 - material_discount / 100))
+    actual_labor = int(labor * (1 - labor_discount / 100))
+    actual_equipment = int(equipment * (1 - equipment_discount / 100))
+    actual_direct = actual_material + actual_labor + actual_equipment
+    
+    # 간접비
+    indirect = int(actual_direct * 0.26 / 0.74)
+    actual_total = actual_direct + indirect
+    
+    # 거품률
+    bubble_rate = round((1 - actual_total / base_price) * 100, 1)
+    
+    # 2. N2B 판정
+    if bubble_rate >= 20:
+        decision = "적극 참여"
+        score = 95
+    elif bubble_rate >= 15:
+        decision = "참여 권장"
+        score = 85
+    elif bubble_rate >= 10:
+        decision = "조건부 참여"
+        score = 70
+    elif bubble_rate >= 5:
+        decision = "신중 검토"
+        score = 55
+    else:
+        decision = "참여 불가"
+        score = 30
+    
+    # 3. 투찰 전략
+    recommend_rate = round(100 - bubble_rate + min_profit_rate, 1)
+    recommend_price = int(base_price * recommend_rate / 100)
+    expected_profit = int(recommend_price - actual_total)
+    
+    return {
+        "bid_no": bid_no,
+        "summary": {
+            "기초금액": f"{base_price:,}원",
+            "예상원가": f"{actual_total:,}원",
+            "거품률": f"{bubble_rate}%",
+            "판정": decision,
+            "점수": f"{score}점"
+        },
+        "cost_analysis": {
+            "직접공사비": actual_direct,
+            "간접공사비": indirect,
+            "총원가": actual_total,
+            "절감액": base_price - actual_total
+        },
+        "n2b_decision": {
+            "decision": decision,
+            "score": score,
+            "bubble_rate": bubble_rate
+        },
+        "strategy": {
+            "권장투찰률": f"{recommend_rate}%",
+            "권장투찰가": f"{recommend_price:,}원",
+            "예상이익": f"{expected_profit:,}원",
+            "예상이익률": f"{round(expected_profit/recommend_price*100, 1)}%"
+        },
+        "n2b": {
+            "not": f"이 공고는 단순히 {work_type} 공사가 아닙니다",
+            "but": f"거품률 {bubble_rate}%의 {'참여 적합' if bubble_rate >= 10 else '신중 검토'} 공고입니다",
+            "because": f"원가 {actual_total:,}원 대비 기초금액 {base_price:,}원으로, 절감 여력이 {'충분' if bubble_rate >= 15 else '제한적'}합니다"
+        }
+    }
+
 
 if __name__ == "__main__":
     import uvicorn
