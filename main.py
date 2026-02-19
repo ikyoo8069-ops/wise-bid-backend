@@ -798,7 +798,7 @@ class CompanyProfile(BaseModel):
 # 샘플 회사 프로필 (테스트/데모용)
 # ============================================
 SAMPLE_PROFILES = {
-    "도로포장전문": CompanyProfile(
+    "road": CompanyProfile(
         company_name="(주)한길도로",
         business_type="전문건설",
         work_types=["도로", "포장", "아스팔트", "아스콘"],
@@ -808,7 +808,7 @@ SAMPLE_PROFILES = {
         licenses=["도로포장공사업", "비계구조물해체공사업"],
         experiences=["도로포장 50건", "아스팔트포장 30건", "보도블럭 20건"]
     ),
-    "종합건설중견": CompanyProfile(
+    "general": CompanyProfile(
         company_name="대한종합건설(주)",
         business_type="종합건설",
         work_types=["건축", "토목", "도로", "상하수도"],
@@ -818,7 +818,7 @@ SAMPLE_PROFILES = {
         licenses=["토목건축공사업", "토목공사업", "건축공사업"],
         experiences=["공공건축 30건", "도로공사 25건", "하수관로 15건"]
     ),
-    "전기설비전문": CompanyProfile(
+    "electric": CompanyProfile(
         company_name="(주)밝은전기",
         business_type="전문건설",
         work_types=["전기", "통신", "소방", "설비"],
