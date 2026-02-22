@@ -675,14 +675,14 @@ async def get_usage(request: Request):
 async def fetch_bid_announcements(keyword: str, bid_type: str = "공사", count: int = 20) -> list:
     """조달청 입찰공고 조회"""
     type_endpoints = {
-        "물품": "getBidPblancListInfoThngPPSSrch",
-        "공사": "getBidPblancListInfoCnstwkPPSSrch", 
-        "용역": "getBidPblancListInfoServcPPSSrch",
-        "외자": "getBidPblancListInfoFrgcptPPSSrch"
+        "물품": "getBidPblancListInfoThng",
+        "공사": "getBidPblancListInfoCnstwk", 
+        "용역": "getBidPblancListInfoServc",
+        "외자": "getBidPblancListInfoFrgcpt"
     }
     
-    endpoint = type_endpoints.get(bid_type, "getBidPblancListInfoCnstwkPPSSrch")
-    url = f"https://apis.data.go.kr/1230000/BidPublicInfoService04/{endpoint}"
+    endpoint = type_endpoints.get(bid_type, "getBidPblancListInfoCnstwk")
+    url = f"https://apis.data.go.kr/1230000/ad/BidPublicInfoService/{endpoint}"
     
     # 날짜 범위: 최근 30일
     from datetime import timedelta
@@ -1242,13 +1242,13 @@ async def debug_bid_api(keyword: str = "", bid_type: str = "공사"):
     from datetime import timedelta
     
     type_endpoints = {
-        "물품": "getBidPblancListInfoThngPPSSrch",
-        "공사": "getBidPblancListInfoCnstwkPPSSrch", 
-        "용역": "getBidPblancListInfoServcPPSSrch",
+        "물품": "getBidPblancListInfoThng",
+        "공사": "getBidPblancListInfoCnstwk", 
+        "용역": "getBidPblancListInfoServc",
     }
     
-    endpoint = type_endpoints.get(bid_type, "getBidPblancListInfoCnstwkPPSSrch")
-    url = f"https://apis.data.go.kr/1230000/BidPublicInfoService04/{endpoint}"
+    endpoint = type_endpoints.get(bid_type, "getBidPblancListInfoCnstwk")
+    url = f"https://apis.data.go.kr/1230000/ad/BidPublicInfoService/{endpoint}"
     
     end_date = datetime.now()
     start_date = end_date - timedelta(days=30)
