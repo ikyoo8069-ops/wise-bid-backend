@@ -1003,7 +1003,19 @@ async def quick_match(profile_name: str, keyword: str = "", bid_type: str = "공
         "search_keyword": search_keyword,
         "total_found": len(bids),
         "matched_count": len(matched),
+        "match_rate": round(len(matched) / len(bids) * 100, 1) if bids else 0,
         "matched": matched[:20],  # 상위 20개
+        "debug": {
+            "work_types": profile.work_types,
+            "price_range": f"{profile.min_price:,} ~ {profile.max_price:,}",
+            "sample_bids": [
+                {
+                    "name": b.get("bid_name", "")[:40],
+                    "price": b.get("base_price", 0) or b.get("estimated_price", 0),
+                    "deadline": b.get("deadline", "없음")
+                } for b in bids[:5]
+            ]
+        },
         "n2b": {
             "not": f"모든 공고가 {profile.company_name}에 적합한 게 아닙니다",
             "but": f"{len(matched)}건이 매칭되었습니다",
