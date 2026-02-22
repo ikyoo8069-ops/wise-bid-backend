@@ -19,7 +19,7 @@ import os
 import json
 import asyncio
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 app = FastAPI(title="N2B Backend v3.5", description="wise-bid + 가격정보API + 개략원가산출 + 공고매칭")
 
@@ -688,10 +688,10 @@ async def fetch_bid_announcements(keyword: str, bid_type: str = "공사", count:
     endpoint = type_endpoints.get(bid_type, "getBidPblancListInfoCnstwk")
     url = f"https://apis.data.go.kr/1230000/ad/BidPublicInfoService/{endpoint}"
     
-    # 날짜 범위: 최근 30일
+    # 날짜 범위: 최근 7일 (더 신선한 공고)
     from datetime import timedelta
     end_date = datetime.now()
-    start_date = end_date - timedelta(days=30)
+    start_date = end_date - timedelta(days=7)
     
     params = {
         "ServiceKey": PUBLIC_DATA_API_KEY,
@@ -753,7 +753,9 @@ async def fetch_bid_announcements(keyword: str, bid_type: str = "공사", count:
                     "open_date": item.get("opengDt", ""),
                     "region": item.get("ntceInsttOfclAddr", ""),
                     "url": item.get("bidNtceDtlUrl", ""),
-                    "bid_type": bid_type
+                    "bid_type": bid_type,
+                    "main_cnstty": item.get("mainCnsttyNm", ""),  # 주공종명 추가!
+                    "cnstty_list": item.get("cnsttyAccotShreRateList", "")  # 공종 목록
                 }
                 bids.append(bid)
             
@@ -942,16 +944,17 @@ async def quick_match(profile_name: str, keyword: str = "", bid_type: str = "공
         score = 0
         reasons = []
         
-        # 마감일 필터 (마감 전 공고만!)
+        # 마감일 필터 (오늘 마감 포함)
         deadline = bid.get("deadline", "")
         if deadline:
             try:
-                # 다양한 날짜 형식 처리: "2026-02-10 11:00:00" 또는 "20260210"
                 deadline_clean = deadline.replace("-", "").replace(" ", "").replace(":", "")
                 if len(deadline_clean) >= 8:
                     deadline_date = datetime.strptime(deadline_clean[:8], "%Y%m%d")
-                    if deadline_date < today:
-                        continue  # 마감된 공고 제외
+                    # 어제 이전 마감이면 제외 (오늘 마감은 포함)
+                    yesterday = today - timedelta(days=1)
+                    if deadline_date < yesterday:
+                        continue
             except:
                 pass  # 날짜 파싱 실패시 일단 포함
         
@@ -965,15 +968,25 @@ async def quick_match(profile_name: str, keyword: str = "", bid_type: str = "공
             else:
                 continue
         
-        # 공종 매칭 (필수!)
+        # 공종 매칭 (주공종명 + 공고명에서 검색)
         bid_name = bid.get("bid_name", "")
+        main_cnstty = bid.get("main_cnstty", "")  # 예: "도로포장공사업"
+        cnstty_list = bid.get("cnstty_list", "")  # 예: "[도로포장공사업^100]"
+        
+        # 검색 대상 텍스트 합치기
+        search_text = f"{bid_name} {main_cnstty} {cnstty_list}"
+        
         work_type_matched = False
+        matched_work_type = ""
         for work_type in profile.work_types:
-            if work_type in bid_name:
+            if work_type in search_text:
                 score += 25
-                reasons.append(f"공종: {work_type}")
+                matched_work_type = work_type
                 work_type_matched = True
                 break
+        
+        if work_type_matched:
+            reasons.append(f"공종: {matched_work_type} ({main_cnstty})" if main_cnstty else f"공종: {matched_work_type}")
         
         # 공종 매칭 없으면 제외
         if not work_type_matched:
@@ -1011,6 +1024,7 @@ async def quick_match(profile_name: str, keyword: str = "", bid_type: str = "공
             "sample_bids": [
                 {
                     "name": b.get("bid_name", "")[:40],
+                    "main_cnstty": b.get("main_cnstty", "없음"),
                     "price": b.get("base_price", 0) or b.get("estimated_price", 0),
                     "deadline": b.get("deadline", "없음")
                 } for b in bids[:5]
@@ -1099,15 +1113,16 @@ async def match_bids(req: BidSearchRequest, request: Request):
         score = 0
         reasons = []
         
-        # 마감일 필터 (마감 전 공고만!)
+        # 마감일 필터 (오늘 마감 포함)
         deadline = bid.get("deadline", "")
         if deadline:
             try:
                 deadline_clean = deadline.replace("-", "").replace(" ", "").replace(":", "")
                 if len(deadline_clean) >= 8:
                     deadline_date = datetime.strptime(deadline_clean[:8], "%Y%m%d")
-                    if deadline_date < today:
-                        continue  # 마감된 공고 제외
+                    yesterday = today - timedelta(days=1)
+                    if deadline_date < yesterday:
+                        continue
             except:
                 pass
         
@@ -1121,15 +1136,23 @@ async def match_bids(req: BidSearchRequest, request: Request):
             else:
                 continue  # 금액 범위 벗어나면 제외
         
-        # 공종 매칭 (필수!)
+        # 공종 매칭 (주공종명 + 공고명에서 검색)
         bid_name = bid.get("bid_name", "")
+        main_cnstty = bid.get("main_cnstty", "")
+        cnstty_list = bid.get("cnstty_list", "")
+        search_text = f"{bid_name} {main_cnstty} {cnstty_list}"
+        
         work_type_matched = False
+        matched_work_type = ""
         for work_type in req.profile.work_types:
-            if work_type in bid_name:
+            if work_type in search_text:
                 score += 25
-                reasons.append(f"공종 매칭: {work_type}")
+                matched_work_type = work_type
                 work_type_matched = True
                 break
+        
+        if work_type_matched:
+            reasons.append(f"공종: {matched_work_type} ({main_cnstty})" if main_cnstty else f"공종: {matched_work_type}")
         
         # 공종 매칭 없으면 제외
         if not work_type_matched:
