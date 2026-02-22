@@ -143,17 +143,17 @@ class PriceSearchRequest(BaseModel):
 # ============================================
 async def fetch_material_prices(keyword: str, category: str = "토목") -> list:
     """시설공통자재 가격 조회"""
-    base_url = "http://apis.data.go.kr/1230000/PriceInfoService"
+    base_url = "https://apis.data.go.kr/1230000/ao/PriceInfoService"
     
     # 카테고리별 엔드포인트
     endpoints = {
-        "토목": "getCmmnFcltyMtrlCivilInfo",
-        "건축": "getCmmnFcltyMtrlBldgInfo", 
-        "기계": "getCmmnFcltyMtrlMachInfo",
-        "전기": "getCmmnFcltyMtrlElcInfo"
+        "토목": "getPriceInfoListFcltyCmmnMtrlEngrk",
+        "건축": "getPriceInfoListFcltyCmmnMtrlBldng", 
+        "기계": "getPriceInfoListFcltyCmmnMtrlMchnEqp",
+        "전기": "getPriceInfoListFcltyCmmnMtrlEngrk"  # 전기는 토목과 같은 API 사용
     }
     
-    endpoint = endpoints.get(category, "getCmmnFcltyMtrlCivilInfo")
+    endpoint = endpoints.get(category, "getPriceInfoListFcltyCmmnMtrlEngrk")
     
     params = {
         "serviceKey": PUBLIC_DATA_API_KEY,
@@ -166,6 +166,9 @@ async def fetch_material_prices(keyword: str, category: str = "토목") -> list:
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.get(f"{base_url}/{endpoint}", params=params)
+            print(f"[가격정보 API] URL: {base_url}/{endpoint}")
+            print(f"[가격정보 API] Status: {response.status_code}")
+            
             if response.status_code == 200:
                 data = response.json()
                 items = data.get("response", {}).get("body", {}).get("items", [])
@@ -180,7 +183,7 @@ async def fetch_material_prices(keyword: str, category: str = "토목") -> list:
                         "name": item.get("prdctClsfcNoNm", ""),
                         "spec": item.get("dtilPrdctClsfcNoNm", ""),
                         "unit": item.get("unt", ""),
-                        "price": int(item.get("prc", 0)),
+                        "price": int(item.get("prc", 0) or 0),
                         "date": item.get("rgstDt", ""),
                         "region": item.get("splyAreaNm", "전국")
                     })
@@ -192,7 +195,7 @@ async def fetch_material_prices(keyword: str, category: str = "토목") -> list:
 
 async def fetch_market_prices(keyword: str, category: str = "토목") -> list:
     """시장시공가격 조회"""
-    base_url = "http://apis.data.go.kr/1230000/PriceInfoService"
+    base_url = "https://apis.data.go.kr/1230000/ao/PriceInfoService"
     
     endpoints = {
         "토목": "getMrktCnsttnPrcCivilInfo",
@@ -945,13 +948,19 @@ async def quick_match(profile_name: str, keyword: str = "", bid_type: str = "공
             else:
                 continue
         
-        # 공종 매칭
+        # 공종 매칭 (필수!)
         bid_name = bid.get("bid_name", "")
+        work_type_matched = False
         for work_type in profile.work_types:
             if work_type in bid_name:
                 score += 25
                 reasons.append(f"공종: {work_type}")
+                work_type_matched = True
                 break
+        
+        # 공종 매칭 없으면 제외
+        if not work_type_matched:
+            continue
         
         # 지역 매칭
         region = bid.get("region", "") or bid.get("agency", "")
@@ -1067,13 +1076,19 @@ async def match_bids(req: BidSearchRequest, request: Request):
             else:
                 continue  # 금액 범위 벗어나면 제외
         
-        # 공종 매칭
+        # 공종 매칭 (필수!)
         bid_name = bid.get("bid_name", "")
+        work_type_matched = False
         for work_type in req.profile.work_types:
             if work_type in bid_name:
                 score += 25
                 reasons.append(f"공종 매칭: {work_type}")
+                work_type_matched = True
                 break
+        
+        # 공종 매칭 없으면 제외
+        if not work_type_matched:
+            continue
         
         # 지역 매칭
         region = bid.get("region", "") or bid.get("agency", "")
@@ -1249,6 +1264,37 @@ async def debug_bid_api(keyword: str = "", bid_type: str = "공사"):
     
     endpoint = type_endpoints.get(bid_type, "getBidPblancListInfoCnstwk")
     url = f"https://apis.data.go.kr/1230000/ad/BidPublicInfoService/{endpoint}"
+
+@app.get("/api/debug/price-api")
+async def debug_price_api(keyword: str = "아스콘"):
+    """가격정보 API 직접 테스트 (디버그용)"""
+    
+    # 올바른 엔드포인트 테스트
+    url = "https://apis.data.go.kr/1230000/ao/PriceInfoService/getPriceInfoListFcltyCmmnMtrlEngrk"
+    
+    params = {
+        "serviceKey": PUBLIC_DATA_API_KEY,
+        "numOfRows": "5",
+        "pageNo": "1",
+        "type": "json",
+        "prdctClsfcNoNm": keyword
+    }
+    
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(url, params=params)
+            return {
+                "url": url,
+                "keyword": keyword,
+                "status_code": response.status_code,
+                "response_preview": response.text[:1000],
+                "response_json": response.json() if response.status_code == 200 else None
+            }
+    except Exception as e:
+        return {
+            "url": url,
+            "error": str(e)
+        }
     
     end_date = datetime.now()
     start_date = end_date - timedelta(days=30)
