@@ -919,6 +919,123 @@ async def get_sample_profile(profile_name: str):
     }
 
 # ============================================
+# 커스텀 프로필로 공고 매칭
+# ============================================
+class CustomMatchRequest(BaseModel):
+    """커스텀 매칭 요청"""
+    work_types: list = ["도로포장"]
+    min_price: int = 50000000
+    max_price: int = 2000000000
+    regions: list = ["서울", "경기"]
+    keyword: str = ""
+    bid_type: str = "공사"
+
+@app.post("/api/custom-match")
+async def custom_match(req: CustomMatchRequest):
+    """커스텀 프로필로 공고 매칭"""
+    
+    # 키워드 없으면 업종 첫 번째 사용
+    search_keyword = req.keyword if req.keyword else req.work_types[0] if req.work_types else ""
+    
+    # 공고 조회
+    bids = await fetch_bid_announcements(search_keyword, req.bid_type, 100)
+    
+    # 오늘 날짜
+    today = datetime.now()
+    
+    # 매칭 필터링
+    matched = []
+    for bid in bids:
+        score = 0
+        reasons = []
+        
+        # 마감일 필터 (오늘 마감 포함)
+        deadline = bid.get("deadline", "")
+        if deadline:
+            try:
+                deadline_clean = deadline.replace("-", "").replace(" ", "").replace(":", "")
+                if len(deadline_clean) >= 8:
+                    deadline_date = datetime.strptime(deadline_clean[:8], "%Y%m%d")
+                    yesterday = today - timedelta(days=1)
+                    if deadline_date < yesterday:
+                        continue
+            except:
+                pass
+        
+        # 금액 필터
+        price = bid.get("base_price", 0) or bid.get("estimated_price", 0)
+        if price:
+            price = int(price)
+            if req.min_price <= price <= req.max_price:
+                score += 30
+                reasons.append(f"금액 적합 ({price:,}원)")
+            else:
+                continue
+        
+        # 공종 매칭 (주공종명 + 공고명에서 검색)
+        bid_name = bid.get("bid_name", "")
+        main_cnstty = bid.get("main_cnstty", "")
+        cnstty_list = bid.get("cnstty_list", "")
+        search_text = f"{bid_name} {main_cnstty} {cnstty_list}"
+        
+        work_type_matched = False
+        matched_work_type = ""
+        for work_type in req.work_types:
+            if work_type in search_text:
+                score += 25
+                matched_work_type = work_type
+                work_type_matched = True
+                break
+        
+        if work_type_matched:
+            reasons.append(f"공종: {matched_work_type}" + (f" ({main_cnstty})" if main_cnstty else ""))
+        
+        # 공종 매칭 없으면 제외
+        if not work_type_matched:
+            continue
+        
+        # 지역 매칭
+        region = bid.get("region", "") or bid.get("agency", "")
+        region_matched = False
+        if "전국" in req.regions:
+            region_matched = True
+            score += 20
+            reasons.append("지역: 전국")
+        else:
+            for r in req.regions:
+                if r in region:
+                    score += 20
+                    reasons.append(f"지역: {r}")
+                    region_matched = True
+                    break
+        
+        bid["match_score"] = score
+        bid["match_reasons"] = reasons
+        
+        if score >= 25:
+            matched.append(bid)
+    
+    # 마감일 가까운 순으로 정렬
+    matched.sort(key=lambda x: (x.get("deadline", "9999"), -x.get("match_score", 0)))
+    
+    return {
+        "success": True,
+        "work_types": req.work_types,
+        "price_range": f"{req.min_price:,} ~ {req.max_price:,}",
+        "regions": req.regions,
+        "search_keyword": search_keyword,
+        "total_found": len(bids),
+        "matched_count": len(matched),
+        "match_rate": round(len(matched) / len(bids) * 100, 1) if bids else 0,
+        "matched": matched[:20],
+        "n2b": {
+            "not": f"모든 공고가 조건에 맞는 게 아닙니다",
+            "but": f"{len(matched)}건이 매칭되었습니다",
+            "because": f"금액({req.min_price:,}~{req.max_price:,}원), 공종({', '.join(req.work_types[:2])}), 지역({', '.join(req.regions[:3])}) 조건 충족"
+        }
+    }
+
+# ============================================
 # 샘플 프로필로 공고 매칭 (원클릭)
 # ============================================
 @app.get("/api/quick-match/{profile_name}")
