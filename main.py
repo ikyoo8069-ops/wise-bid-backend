@@ -684,25 +684,56 @@ async def fetch_bid_announcements(keyword: str, bid_type: str = "공사", count:
     endpoint = type_endpoints.get(bid_type, "getBidPblancListInfoCnstwkPPSSrch")
     url = f"https://apis.data.go.kr/1230000/BidPublicInfoService04/{endpoint}"
     
+    # 날짜 범위: 최근 30일
+    from datetime import timedelta
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=30)
+    
     params = {
         "ServiceKey": PUBLIC_DATA_API_KEY,
         "pageNo": 1,
         "numOfRows": count,
         "type": "json",
-        "bidNm": keyword,
         "inqryDiv": "1",
-        "inqryBgnDt": (datetime.now().replace(day=1)).strftime("%Y%m%d") + "0000",
-        "inqryEndDt": datetime.now().strftime("%Y%m%d") + "2359"
+        "inqryBgnDt": start_date.strftime("%Y%m%d") + "0000",
+        "inqryEndDt": end_date.strftime("%Y%m%d") + "2359"
     }
+    
+    # 키워드 있으면 추가
+    if keyword and keyword.strip():
+        params["bidNm"] = keyword
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.get(url, params=params)
+            print(f"[조달청 API] URL: {url}")
+            print(f"[조달청 API] Status: {response.status_code}")
+            print(f"[조달청 API] Response: {response.text[:500]}")
+            
             response.raise_for_status()
             data = response.json()
-            items = data.get("response", {}).get("body", {}).get("items", [])
+            
+            # 응답 구조 확인
+            response_data = data.get("response", {})
+            header = response_data.get("header", {})
+            result_code = header.get("resultCode", "")
+            result_msg = header.get("resultMsg", "")
+            
+            print(f"[조달청 API] Result: {result_code} - {result_msg}")
+            
+            body = response_data.get("body", {})
+            items = body.get("items", [])
+            
+            # items가 리스트가 아닐 수 있음
+            if isinstance(items, dict):
+                items = items.get("item", [])
+            if not isinstance(items, list):
+                items = [items] if items else []
+            
             if not items:
+                print(f"[조달청 API] No items found")
                 return []
+            
             bids = []
             for item in items:
                 bid = {
@@ -721,9 +752,13 @@ async def fetch_bid_announcements(keyword: str, bid_type: str = "공사", count:
                     "bid_type": bid_type
                 }
                 bids.append(bid)
+            
+            print(f"[조달청 API] Found {len(bids)} bids")
             return bids
     except Exception as e:
         print(f"[조달청 입찰공고 오류] {e}")
+        import traceback
+        traceback.print_exc()
         return []
 
 # ============================================
@@ -1197,6 +1232,57 @@ async def full_analysis(
             "because": f"원가 {actual_total:,}원 대비 기초금액 {base_price:,}원으로, 절감 여력이 {'충분' if bubble_rate >= 15 else '제한적'}합니다"
         }
     }
+
+# ============================================
+# 디버그 API - 조달청 API 직접 테스트
+# ============================================
+@app.get("/api/debug/bid-api")
+async def debug_bid_api(keyword: str = "", bid_type: str = "공사"):
+    """조달청 API 직접 테스트 (디버그용)"""
+    from datetime import timedelta
+    
+    type_endpoints = {
+        "물품": "getBidPblancListInfoThngPPSSrch",
+        "공사": "getBidPblancListInfoCnstwkPPSSrch", 
+        "용역": "getBidPblancListInfoServcPPSSrch",
+    }
+    
+    endpoint = type_endpoints.get(bid_type, "getBidPblancListInfoCnstwkPPSSrch")
+    url = f"https://apis.data.go.kr/1230000/BidPublicInfoService04/{endpoint}"
+    
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=30)
+    
+    params = {
+        "ServiceKey": PUBLIC_DATA_API_KEY,
+        "pageNo": 1,
+        "numOfRows": 5,
+        "type": "json",
+        "inqryDiv": "1",
+        "inqryBgnDt": start_date.strftime("%Y%m%d") + "0000",
+        "inqryEndDt": end_date.strftime("%Y%m%d") + "2359"
+    }
+    
+    if keyword:
+        params["bidNm"] = keyword
+    
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(url, params=params)
+            return {
+                "url": url,
+                "params": {k: v for k, v in params.items() if k != "ServiceKey"},
+                "api_key_preview": PUBLIC_DATA_API_KEY[:10] + "...",
+                "status_code": response.status_code,
+                "response_preview": response.text[:1000],
+                "response_json": response.json() if response.status_code == 200 else None
+            }
+    except Exception as e:
+        return {
+            "error": str(e),
+            "url": url,
+            "params": {k: v for k, v in params.items() if k != "ServiceKey"}
+        }
 
 
 if __name__ == "__main__":
