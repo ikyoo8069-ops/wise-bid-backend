@@ -145,15 +145,15 @@ async def fetch_material_prices(keyword: str, category: str = "토목") -> list:
     """시설공통자재 가격 조회"""
     base_url = "https://apis.data.go.kr/1230000/ao/PriceInfoService"
     
-    # 카테고리별 엔드포인트
+    # 카테고리별 엔드포인트 (정확한 철자!)
     endpoints = {
-        "토목": "getPriceInfoListFcltyCmmnMtrlEngrk",
-        "건축": "getPriceInfoListFcltyCmmnMtrlBldng", 
-        "기계": "getPriceInfoListFcltyCmmnMtrlMchnEqp",
-        "전기": "getPriceInfoListFcltyCmmnMtrlEngrk"  # 전기는 토목과 같은 API 사용
+        "토목": "getPriceInfoListFcltyCmmnMtrilEngrk",
+        "건축": "getPriceInfoListFcltyCmmnMtrilBildng", 
+        "기계": "getPriceInfoListFcltyCmmnMtrilMchnEqp",
+        "전기": "getPriceInfoListFcltyCmmnMtrilElctyIrmc"
     }
     
-    endpoint = endpoints.get(category, "getPriceInfoListFcltyCmmnMtrlEngrk")
+    endpoint = endpoints.get(category, "getPriceInfoListFcltyCmmnMtrilEngrk")
     
     params = {
         "serviceKey": PUBLIC_DATA_API_KEY,
@@ -181,11 +181,11 @@ async def fetch_material_prices(keyword: str, category: str = "토목") -> list:
                 for item in items:
                     results.append({
                         "name": item.get("prdctClsfcNoNm", ""),
-                        "spec": item.get("dtilPrdctClsfcNoNm", ""),
-                        "unit": item.get("unt", ""),
-                        "price": int(item.get("prc", 0) or 0),
-                        "date": item.get("rgstDt", ""),
-                        "region": item.get("splyAreaNm", "전국")
+                        "spec": item.get("krnPrdctNm", ""),
+                        "unit": item.get("unit", ""),
+                        "price": int(item.get("prce", 0) or 0),
+                        "date": item.get("nticeDt", ""),
+                        "region": item.get("splyJrsdctRgnNm", "전국")
                     })
                 return results
     except Exception as e:
@@ -197,13 +197,14 @@ async def fetch_market_prices(keyword: str, category: str = "토목") -> list:
     """시장시공가격 조회"""
     base_url = "https://apis.data.go.kr/1230000/ao/PriceInfoService"
     
+    # 시장시공가격 엔드포인트
     endpoints = {
-        "토목": "getMrktCnsttnPrcCivilInfo",
-        "건축": "getMrktCnsttnPrcBldgInfo",
-        "기계": "getMrktCnsttnPrcMachInfo"
+        "토목": "getPriceInfoListMrktCnstrctPcEngrk",
+        "건축": "getPriceInfoListMrktCnstrctPcBildng",
+        "기계": "getPriceInfoListMrktCnstrctPcMchnEqp"
     }
     
-    endpoint = endpoints.get(category, "getMrktCnsttnPrcCivilInfo")
+    endpoint = endpoints.get(category, "getPriceInfoListMrktCnstrctPcEngrk")
     
     params = {
         "serviceKey": PUBLIC_DATA_API_KEY,
@@ -1266,11 +1267,11 @@ async def debug_bid_api(keyword: str = "", bid_type: str = "공사"):
     url = f"https://apis.data.go.kr/1230000/ad/BidPublicInfoService/{endpoint}"
 
 @app.get("/api/debug/price-api")
-async def debug_price_api(keyword: str = "아스콘"):
+async def debug_price_api(keyword: str = "복공판"):
     """가격정보 API 직접 테스트 (디버그용)"""
     
     # 올바른 엔드포인트 테스트
-    url = "https://apis.data.go.kr/1230000/ao/PriceInfoService/getPriceInfoListFcltyCmmnMtrlEngrk"
+    url = "https://apis.data.go.kr/1230000/ao/PriceInfoService/getPriceInfoListFcltyCmmnMtrilEngrk"
     
     params = {
         "serviceKey": PUBLIC_DATA_API_KEY,
