@@ -930,14 +930,30 @@ async def quick_match(profile_name: str, keyword: str = "", bid_type: str = "공
     # 키워드 없으면 주력 공종 첫 번째 사용
     search_keyword = keyword if keyword else profile.work_types[0] if profile.work_types else ""
     
-    # 공고 조회
-    bids = await fetch_bid_announcements(search_keyword, bid_type, 30)
+    # 공고 조회 (100건으로 늘림)
+    bids = await fetch_bid_announcements(search_keyword, bid_type, 100)
+    
+    # 오늘 날짜
+    today = datetime.now()
     
     # 매칭 필터링
     matched = []
     for bid in bids:
         score = 0
         reasons = []
+        
+        # 마감일 필터 (마감 전 공고만!)
+        deadline = bid.get("deadline", "")
+        if deadline:
+            try:
+                # 다양한 날짜 형식 처리: "2026-02-10 11:00:00" 또는 "20260210"
+                deadline_clean = deadline.replace("-", "").replace(" ", "").replace(":", "")
+                if len(deadline_clean) >= 8:
+                    deadline_date = datetime.strptime(deadline_clean[:8], "%Y%m%d")
+                    if deadline_date < today:
+                        continue  # 마감된 공고 제외
+            except:
+                pass  # 날짜 파싱 실패시 일단 포함
         
         # 금액 필터
         price = bid.get("base_price", 0) or bid.get("estimated_price", 0)
@@ -977,7 +993,8 @@ async def quick_match(profile_name: str, keyword: str = "", bid_type: str = "공
         if score >= 25:
             matched.append(bid)
     
-    matched.sort(key=lambda x: x.get("match_score", 0), reverse=True)
+    # 마감일 가까운 순으로 정렬
+    matched.sort(key=lambda x: (x.get("deadline", "9999"), -x.get("match_score", 0)))
     
     return {
         "success": True,
@@ -1061,11 +1078,26 @@ async def match_bids(req: BidSearchRequest, request: Request):
             "message": "프로필 없음 - 전체 공고 반환"
         }
     
+    # 오늘 날짜
+    today = datetime.now()
+    
     # 매칭 필터링
     matched = []
     for bid in bids:
         score = 0
         reasons = []
+        
+        # 마감일 필터 (마감 전 공고만!)
+        deadline = bid.get("deadline", "")
+        if deadline:
+            try:
+                deadline_clean = deadline.replace("-", "").replace(" ", "").replace(":", "")
+                if len(deadline_clean) >= 8:
+                    deadline_date = datetime.strptime(deadline_clean[:8], "%Y%m%d")
+                    if deadline_date < today:
+                        continue  # 마감된 공고 제외
+            except:
+                pass
         
         # 금액 필터
         price = bid.get("base_price", 0) or bid.get("estimated_price", 0)
@@ -1106,8 +1138,8 @@ async def match_bids(req: BidSearchRequest, request: Request):
         if score >= 25:  # 최소 25점 이상
             matched.append(bid)
     
-    # 점수순 정렬
-    matched.sort(key=lambda x: x.get("match_score", 0), reverse=True)
+    # 마감일 가까운 순 정렬
+    matched.sort(key=lambda x: (x.get("deadline", "9999"), -x.get("match_score", 0)))
     
     return {
         "success": True,
