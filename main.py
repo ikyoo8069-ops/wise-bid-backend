@@ -1432,7 +1432,7 @@ async def debug_bid_result_api(bid_type: str = "공사", keyword: str = ""):
     """조달청 낙찰정보서비스 API 직접 테스트"""
     
     # 낙찰정보 엔드포인트
-    url = "https://apis.data.go.kr/1230000/as/ScsbidInfoService/getOpengResultListInfoCnstwk01"
+    url = "https://apis.data.go.kr/1230000/as/ScsbidInfoService/getScsbidListSttusCnstwk"
     
     end_date = datetime.now()
     start_date = end_date - timedelta(days=180)
@@ -1543,11 +1543,11 @@ async def get_bid_rate(
     # 조달청 낙찰정보서비스 API - 업무별 엔드포인트
     bid_category = COST_RATIOS.get(work_type, {}).get("category", "공사")
     endpoint_map = {
-        "공사": "getOpengResultListInfoCnstwk01",
-        "용역": "getOpengResultListInfoServc01",
-        "물품": "getOpengResultListInfoThng01"
+        "공사": "getScsbidListSttusCnstwk",
+        "용역": "getScsbidListSttusServc",
+        "물품": "getScsbidListSttusThng"
     }
-    api_endpoint = endpoint_map.get(bid_category, "getOpengResultListInfoCnstwk01")
+    api_endpoint = endpoint_map.get(bid_category, "getScsbidListSttusCnstwk")
     url = f"https://apis.data.go.kr/1230000/as/ScsbidInfoService/{api_endpoint}"
     
     end_date = datetime.now()
