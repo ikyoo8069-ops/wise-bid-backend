@@ -475,18 +475,24 @@ def analyze_n2b_decision(
 @app.get("/")
 async def root():
     return {
-        "service": "wise-bid API v3.4",
+        "service": "wise-bid API v3.5",
         "features": [
             "가격정보 API 연동",
             "공종별 비율 DB",
             "개략원가 자동 산출",
-            "N2B 참여 판정"
+            "N2B 참여 판정",
+            "입찰공고 조회/매칭 (NEW!)",
+            "회사 프로필 매칭 (NEW!)"
         ],
         "endpoints": {
             "/api/cost-ratios": "공종별 비율 조회",
             "/api/price-search": "자재/시공 단가 검색",
             "/api/cost-estimate": "개략원가 산출",
-            "/api/n2b-decision": "N2B 참여 판정"
+            "/api/n2b-decision": "N2B 참여 판정",
+            "/api/quick-match/{profile}": "샘플 프로필 매칭",
+            "/api/custom-match": "커스텀 조건 매칭",
+            "/api/debug/bid-api": "입찰공고 API 테스트",
+            "/api/debug/price-api": "가격정보 API 테스트"
         }
     }
 
