@@ -1435,7 +1435,7 @@ async def debug_bid_result_api(bid_type: str = "공사", keyword: str = ""):
     url = "https://apis.data.go.kr/1230000/as/ScsbidInfoService/getScsbidListSttusCnstwk"
     
     end_date = datetime.now()
-    start_date = end_date - timedelta(days=180)
+    start_date = end_date - timedelta(days=30)
     
     params = {
         "ServiceKey": PUBLIC_DATA_API_KEY,
@@ -1513,7 +1513,7 @@ async def get_bid_rate(
     work_type: str = "도로",
     min_price: int = 30000000,
     max_price: int = 1000000000,
-    days: int = 180
+    days: int = 30
 ):
     """공종별/금액별 평균 낙찰률 조회"""
     
