@@ -1548,6 +1548,180 @@ async def debug_price_api(keyword: str = "복공판"):
         }
 
 
+# ============================================
+# 낙찰률 조회 API - 조달청 낙찰정보서비스
+# ============================================
+@app.get("/api/bid-rate")
+async def get_bid_rate(
+    work_type: str = "도로",
+    min_price: int = 30000000,
+    max_price: int = 1000000000,
+    days: int = 180
+):
+    """공종별/금액별 평균 낙찰률 조회"""
+    
+    # 공종 키워드 매핑
+    work_type_keywords = {
+        "도로": ["도로", "포장", "아스콘", "아스팔트"],
+        "토목": ["토목", "토공", "기초", "굴착"],
+        "건축": ["건축", "건물", "신축", "리모델링"],
+        "전기": ["전기", "조명", "배선", "통신"],
+        "설비": ["설비", "기계", "배관", "소방"],
+        "조경": ["조경", "식재", "녹지", "공원"],
+        "상하수도": ["상하수도", "관로", "배수", "급수"]
+    }
+    
+    keywords = work_type_keywords.get(work_type, [work_type])
+    
+    # 조달청 낙찰정보서비스 API
+    url = "https://apis.data.go.kr/1230000/as/ScsbidInfoService/getOpengResultListInfoCnstwk01"
+    
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=days)
+    
+    params = {
+        "ServiceKey": PUBLIC_DATA_API_KEY,
+        "pageNo": 1,
+        "numOfRows": 100,
+        "type": "json",
+        "inqryDiv": "1",
+        "inqryBgnDt": start_date.strftime("%Y%m%d") + "0000",
+        "inqryEndDt": end_date.strftime("%Y%m%d") + "2359"
+    }
+    
+    bid_rates = []
+    
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(url, params=params)
+            
+            if response.status_code != 200:
+                # API 실패 시 기본값 반환
+                return get_default_bid_rate(work_type, min_price, max_price)
+            
+            data = response.json()
+            items = data.get("response", {}).get("body", {}).get("items", [])
+            
+            if not items:
+                return get_default_bid_rate(work_type, min_price, max_price)
+            
+            for item in items:
+                try:
+                    bid_name = item.get("bidNm", "")
+                    base_price = int(item.get("bssamt", 0) or 0)
+                    bid_price = int(item.get("sucsfbidAmt", 0) or item.get("bidprc", 0) or 0)
+                    
+                    # 필터링: 금액 범위
+                    if base_price < min_price or base_price > max_price:
+                        continue
+                    
+                    # 필터링: 공종 키워드
+                    if not any(kw in bid_name for kw in keywords):
+                        continue
+                    
+                    # 낙찰률 계산
+                    if base_price > 0 and bid_price > 0:
+                        rate = (bid_price / base_price) * 100
+                        if 70 <= rate <= 100:  # 유효한 범위만
+                            bid_rates.append({
+                                "name": bid_name[:50],
+                                "base_price": base_price,
+                                "bid_price": bid_price,
+                                "rate": round(rate, 2)
+                            })
+                except:
+                    continue
+            
+            if not bid_rates:
+                return get_default_bid_rate(work_type, min_price, max_price)
+            
+            # 평균 계산
+            avg_rate = sum(r["rate"] for r in bid_rates) / len(bid_rates)
+            min_rate = min(r["rate"] for r in bid_rates)
+            max_rate = max(r["rate"] for r in bid_rates)
+            
+            return {
+                "work_type": work_type,
+                "period": f"최근 {days}일",
+                "price_range": f"{min_price//10000000}천만원 ~ {max_price//10000000}천만원",
+                "sample_count": len(bid_rates),
+                "avg_bid_rate": round(avg_rate, 2),
+                "min_bid_rate": round(min_rate, 2),
+                "max_bid_rate": round(max_rate, 2),
+                "samples": bid_rates[:10],  # 상위 10개 샘플
+                "source": "조달청 낙찰정보서비스"
+            }
+            
+    except Exception as e:
+        return get_default_bid_rate(work_type, min_price, max_price, error=str(e))
+
+
+def get_default_bid_rate(work_type: str, min_price: int, max_price: int, error: str = None):
+    """기본 낙찰률 (API 실패 시 또는 데이터 부족 시)"""
+    
+    # 공종별 경험적 평균 낙찰률
+    default_rates = {
+        "도로": 84.5,
+        "토목": 83.2,
+        "건축": 86.1,
+        "전기": 85.3,
+        "설비": 84.8,
+        "조경": 83.7,
+        "상하수도": 84.2,
+        "기타": 85.0
+    }
+    
+    # 금액대별 보정 (소규모일수록 경쟁 치열)
+    if max_price <= 100000000:  # 1억 이하
+        adjustment = -1.5
+    elif max_price <= 500000000:  # 5억 이하
+        adjustment = -0.5
+    else:
+        adjustment = 0.5
+    
+    base_rate = default_rates.get(work_type, 85.0)
+    adjusted_rate = base_rate + adjustment
+    
+    result = {
+        "work_type": work_type,
+        "period": "경험적 기준값",
+        "price_range": f"{min_price//10000000}천만원 ~ {max_price//10000000}천만원",
+        "sample_count": 0,
+        "avg_bid_rate": round(adjusted_rate, 2),
+        "min_bid_rate": round(adjusted_rate - 3, 2),
+        "max_bid_rate": round(adjusted_rate + 3, 2),
+        "samples": [],
+        "source": "경험적 기준값 (API 데이터 부족)"
+    }
+    
+    if error:
+        result["error"] = error
+    
+    return result
+
+
+@app.get("/api/bid-rate/summary")
+async def get_bid_rate_summary():
+    """전체 공종별 평균 낙찰률 요약"""
+    
+    work_types = ["도로", "토목", "건축", "전기", "설비", "조경", "상하수도"]
+    results = {}
+    
+    for wt in work_types:
+        result = await get_bid_rate(work_type=wt, days=90)
+        results[wt] = {
+            "avg_rate": result["avg_bid_rate"],
+            "sample_count": result["sample_count"],
+            "source": result["source"]
+        }
+    
+    return {
+        "summary": results,
+        "updated": datetime.now().isoformat(),
+        "note": "낙찰률 = 낙찰금액 / 기초금액 × 100%"
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=10000)
