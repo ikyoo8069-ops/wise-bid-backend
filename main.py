@@ -1445,7 +1445,6 @@ async def full_analysis(
 @app.get("/api/debug/bid-api")
 async def debug_bid_api(keyword: str = "", bid_type: str = "공사"):
     """조달청 API 직접 테스트 (디버그용)"""
-    from datetime import timedelta
     
     type_endpoints = {
         "물품": "getBidPblancListInfoThng",
@@ -1455,6 +1454,49 @@ async def debug_bid_api(keyword: str = "", bid_type: str = "공사"):
     
     endpoint = type_endpoints.get(bid_type, "getBidPblancListInfoCnstwk")
     url = f"https://apis.data.go.kr/1230000/ad/BidPublicInfoService/{endpoint}"
+    
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=7)
+    
+    params = {
+        "ServiceKey": PUBLIC_DATA_API_KEY,
+        "pageNo": 1,
+        "numOfRows": 10,
+        "type": "json",
+        "inqryDiv": "1",
+        "inqryBgnDt": start_date.strftime("%Y%m%d") + "0000",
+        "inqryEndDt": end_date.strftime("%Y%m%d") + "2359"
+    }
+    
+    if keyword:
+        params["bidNm"] = keyword
+    
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(url, params=params)
+            data = response.json() if response.status_code == 200 else None
+            
+            # 공고 건수 추출
+            total_count = 0
+            if data:
+                total_count = data.get("response", {}).get("body", {}).get("totalCount", 0)
+            
+            return {
+                "url": url,
+                "bid_type": bid_type,
+                "keyword": keyword,
+                "params": {k: v for k, v in params.items() if k != "ServiceKey"},
+                "api_key_preview": PUBLIC_DATA_API_KEY[:10] + "...",
+                "status_code": response.status_code,
+                "total_count": total_count,
+                "response_preview": response.text[:500],
+                "response_json": data
+            }
+    except Exception as e:
+        return {
+            "error": str(e),
+            "url": url
+        }
 
 @app.get("/api/debug/price-api")
 async def debug_price_api(keyword: str = "복공판"):
@@ -1485,40 +1527,6 @@ async def debug_price_api(keyword: str = "복공판"):
         return {
             "url": url,
             "error": str(e)
-        }
-    
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=30)
-    
-    params = {
-        "ServiceKey": PUBLIC_DATA_API_KEY,
-        "pageNo": 1,
-        "numOfRows": 5,
-        "type": "json",
-        "inqryDiv": "1",
-        "inqryBgnDt": start_date.strftime("%Y%m%d") + "0000",
-        "inqryEndDt": end_date.strftime("%Y%m%d") + "2359"
-    }
-    
-    if keyword:
-        params["bidNm"] = keyword
-    
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(url, params=params)
-            return {
-                "url": url,
-                "params": {k: v for k, v in params.items() if k != "ServiceKey"},
-                "api_key_preview": PUBLIC_DATA_API_KEY[:10] + "...",
-                "status_code": response.status_code,
-                "response_preview": response.text[:1000],
-                "response_json": response.json() if response.status_code == 200 else None
-            }
-    except Exception as e:
-        return {
-            "error": str(e),
-            "url": url,
-            "params": {k: v for k, v in params.items() if k != "ServiceKey"}
         }
 
 
