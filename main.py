@@ -6,6 +6,7 @@
 # + N2B 참여 판정
 # + 입찰공고 조회/매칭 (NEW!)
 # + 회사 프로필 매칭 (NEW!)
+# + 낙찰률 조회 API (NEW!)
 # ============================================
 
 from fastapi import FastAPI, HTTPException, Request
@@ -21,7 +22,7 @@ import asyncio
 import re
 from datetime import date, datetime, timedelta
 
-app = FastAPI(title="N2B Backend v3.5", description="wise-bid + 가격정보API + 개략원가산출 + 공고매칭")
+app = FastAPI(title="N2B Backend v3.5", description="wise-bid + 가격정보API + 개략원가산출 + 공고매칭 + 낙찰률")
 
 app.add_middleware(
     CORSMiddleware,
@@ -59,16 +60,16 @@ COST_RATIOS = {
 
 # 간접비 비율 (직접공사비 대비)
 INDIRECT_RATIOS = {
-    "간접노무비": 12.0,  # 직접노무비의 12%
+    "간접노무비": 12.0,
     "산재보험료": 3.7,
     "고용보험료": 1.05,
     "건강보험료": 3.545,
     "연금보험료": 4.5,
     "퇴직공제부금": 2.3,
-    "안전관리비": 1.97,  # 공사 규모별 상이
+    "안전관리비": 1.97,
     "환경보전비": 0.5,
-    "일반관리비": 6.0,   # 직접공사비의 6%
-    "이윤": 15.0         # 직접공사비+일반관리비의 15%
+    "일반관리비": 6.0,
+    "이윤": 15.0
 }
 
 # ============================================
@@ -79,7 +80,7 @@ LIMITS = {
     "proposal": {"normal": 10, "premium": 200},
     "agency": {"normal": 100},
     "bid": {"normal": 10, "premium": 200},
-    "cost": {"normal": 20, "premium": 200}  # 원가분석용
+    "cost": {"normal": 20, "premium": 200}
 }
 
 daily_usage: dict = {}
@@ -117,35 +118,30 @@ def check_rate_limit(ip: str, app_type: str, is_premium: bool = False) -> dict:
 # 요청 모델
 # ============================================
 class CostEstimateRequest(BaseModel):
-    """개략원가 산출 요청"""
-    base_price: int  # 기초금액
-    work_type: str = "기타"  # 공종
-    material_discount: float = 0  # 재료비 절감률 (%)
-    labor_discount: float = 0  # 노무비 절감률 (%)
-    equipment_discount: float = 0  # 경비 절감률 (%)
+    base_price: int
+    work_type: str = "기타"
+    material_discount: float = 0
+    labor_discount: float = 0
+    equipment_discount: float = 0
     
 class N2BDecisionRequest(BaseModel):
-    """N2B 참여 판정 요청"""
-    base_price: int  # 기초금액
-    estimated_cost: int  # 예상 원가
+    base_price: int
+    estimated_cost: int
     work_type: str = "기타"
-    min_profit_rate: float = 10  # 최소 요구 수익률 (%)
-    company_strength: List[str] = []  # 회사 강점
-    company_weakness: List[str] = []  # 회사 약점
+    min_profit_rate: float = 10
+    company_strength: List[str] = []
+    company_weakness: List[str] = []
 
 class PriceSearchRequest(BaseModel):
-    """자재/시공 단가 검색"""
     keyword: str
-    category: str = "all"  # all, material, labor, equipment
+    category: str = "all"
 
 # ============================================
 # 조달청 가격정보 API
 # ============================================
 async def fetch_material_prices(keyword: str, category: str = "토목") -> list:
-    """시설공통자재 가격 조회"""
     base_url = "https://apis.data.go.kr/1230000/ao/PriceInfoService"
     
-    # 카테고리별 엔드포인트 (정확한 철자!)
     endpoints = {
         "토목": "getPriceInfoListFcltyCmmnMtrilEngrk",
         "건축": "getPriceInfoListFcltyCmmnMtrilBildng", 
@@ -160,14 +156,12 @@ async def fetch_material_prices(keyword: str, category: str = "토목") -> list:
         "numOfRows": "20",
         "pageNo": "1",
         "type": "json",
-        "prdctClsfcNoNm": keyword  # 품명 검색
+        "prdctClsfcNoNm": keyword
     }
     
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.get(f"{base_url}/{endpoint}", params=params)
-            print(f"[가격정보 API] URL: {base_url}/{endpoint}")
-            print(f"[가격정보 API] Status: {response.status_code}")
             
             if response.status_code == 200:
                 data = response.json()
@@ -194,10 +188,8 @@ async def fetch_material_prices(keyword: str, category: str = "토목") -> list:
     return []
 
 async def fetch_market_prices(keyword: str, category: str = "토목") -> list:
-    """시장시공가격 조회"""
     base_url = "https://apis.data.go.kr/1230000/ao/PriceInfoService"
     
-    # 시장시공가격 엔드포인트
     endpoints = {
         "토목": "getPriceInfoListMrktCnstrctPcEngrk",
         "건축": "getPriceInfoListMrktCnstrctPcBildng",
@@ -251,45 +243,29 @@ def calculate_rough_cost(
     labor_discount: float = 0,
     equipment_discount: float = 0
 ) -> dict:
-    """
-    개략원가 산출
-    
-    기초금액에서 역산하여 직접공사비 추정 후,
-    업체별 절감률을 적용하여 실제원가 계산
-    """
-    
-    # 1. 공종별 비율 가져오기
     ratios = COST_RATIOS.get(work_type, COST_RATIOS["기타"])
     
-    # 2. 기초금액 구성 역산 (일반적인 설계금액 구조)
-    # 기초금액 = 직접공사비 + 간접공사비 + 일반관리비 + 이윤
-    # 대략 직접공사비 = 기초금액 / 1.35 (35% 간접비 가정)
-    direct_cost_ratio = 0.74  # 직접공사비가 기초금액의 약 74%
-    
+    direct_cost_ratio = 0.74
     estimated_direct_cost = int(base_price * direct_cost_ratio)
     
-    # 3. 직접공사비 구성
     material_cost = int(estimated_direct_cost * ratios["재료비"] / 100)
     labor_cost = int(estimated_direct_cost * ratios["노무비"] / 100)
     equipment_cost = int(estimated_direct_cost * ratios["경비"] / 100)
     
-    # 4. 표준원가 (설계기준)
     standard_cost = {
         "재료비": material_cost,
         "노무비": labor_cost,
         "경비": equipment_cost,
         "직접공사비": estimated_direct_cost,
-        "간접비": int(base_price * 0.26),  # 26% 간접비
+        "간접비": int(base_price * 0.26),
         "합계": base_price
     }
     
-    # 5. 실제원가 (업체 절감률 적용)
     actual_material = int(material_cost * (1 - material_discount / 100))
     actual_labor = int(labor_cost * (1 - labor_discount / 100))
     actual_equipment = int(equipment_cost * (1 - equipment_discount / 100))
     actual_direct = actual_material + actual_labor + actual_equipment
     
-    # 간접비도 비례 감소 (직접비 감소에 따라)
     direct_reduction_rate = actual_direct / estimated_direct_cost if estimated_direct_cost > 0 else 1
     actual_indirect = int(base_price * 0.26 * direct_reduction_rate)
     
@@ -304,20 +280,15 @@ def calculate_rough_cost(
         "합계": actual_total
     }
     
-    # 6. 거품률 계산
     bubble_rate = ((base_price - actual_total) / base_price * 100) if base_price > 0 else 0
     
-    # 7. 투찰 범위 계산 (예정가격 ±3% 범위 고려)
     min_expected_price = int(base_price * 0.97)
     max_expected_price = int(base_price * 1.03)
-    
-    # 최저 투찰가 = 원가 + 최소이익 (5%)
     min_bid_price = int(actual_total * 1.05)
     
-    # 권장 투찰률 = 원가/기초금액 + 10% 마진
     recommended_rate = (actual_total / base_price * 100) + 10 if base_price > 0 else 88
-    recommended_rate = min(recommended_rate, 95)  # 최대 95%
-    recommended_rate = max(recommended_rate, 75)  # 최소 75%
+    recommended_rate = min(recommended_rate, 95)
+    recommended_rate = max(recommended_rate, 75)
     
     return {
         "기초금액": base_price,
@@ -356,19 +327,12 @@ def analyze_n2b_decision(
     company_strength: List[str] = [],
     company_weakness: List[str] = []
 ) -> dict:
-    """
-    N2B 프레임워크 기반 참여 판정
-    """
-    
-    # 1. 기본 지표 계산
     bubble_rate = ((base_price - estimated_cost) / base_price * 100) if base_price > 0 else 0
     potential_profit = base_price - estimated_cost
     profit_rate = (potential_profit / estimated_cost * 100) if estimated_cost > 0 else 0
     
-    # 2. 참여 점수 계산 (100점 만점)
-    score = 50  # 기본점수
+    score = 50
     
-    # 거품률 점수 (0-30점)
     if bubble_rate >= 25:
         score += 30
     elif bubble_rate >= 20:
@@ -379,10 +343,7 @@ def analyze_n2b_decision(
         score += 15
     elif bubble_rate >= 5:
         score += 10
-    else:
-        score += 0
     
-    # 수익률 점수 (0-20점)
     if profit_rate >= min_profit_rate + 10:
         score += 20
     elif profit_rate >= min_profit_rate + 5:
@@ -394,7 +355,6 @@ def analyze_n2b_decision(
     else:
         score -= 10
     
-    # 회사 강점/약점 반영
     strength_keywords = {
         "재료": ["거래처", "직거래", "자재", "재료"],
         "인력": ["직영", "숙련", "인력", "노무"],
@@ -410,10 +370,8 @@ def analyze_n2b_decision(
         if any(kw in weakness for kw in ["미경험", "부족", "없음", "처음"]):
             score -= 5
     
-    # 점수 범위 제한
     score = max(0, min(100, score))
     
-    # 3. 판정
     if score >= 75:
         decision = "적극 참여"
         recommendation = "수익성 높음, 적극 참여 권장"
@@ -430,14 +388,12 @@ def analyze_n2b_decision(
         decision = "불참 권장"
         recommendation = "수익성 낮음, 불참 권장"
     
-    # 4. N2B 분석문 생성
     n2b = {
         "not": f"단순히 기초금액 {base_price:,}원이 커서 참여하는 것이 아니다",
         "but": f"실제원가 {estimated_cost:,}원 대비 거품률 {bubble_rate:.1f}%가 판단 기준이다",
         "because": f"거품률이 {'충분하여' if bubble_rate >= 15 else '부족하여'} 예상수익률 {profit_rate:.1f}%{'로 참여 가치가 있다' if profit_rate >= min_profit_rate else '로 리스크가 있다'}"
     }
     
-    # 5. 리스크 분석
     risks = []
     if bubble_rate < 10:
         risks.append("거품률 낮음 - 경쟁 심화 시 손실 가능")
@@ -475,14 +431,15 @@ def analyze_n2b_decision(
 @app.get("/")
 async def root():
     return {
-        "service": "wise-bid API v3.5",
+        "service": "wise-bid API v4.0",
         "features": [
             "가격정보 API 연동",
             "공종별 비율 DB",
             "개략원가 자동 산출",
             "N2B 참여 판정",
-            "입찰공고 조회/매칭 (NEW!)",
-            "회사 프로필 매칭 (NEW!)"
+            "입찰공고 조회/매칭",
+            "회사 프로필 매칭",
+            "낙찰률 조회 API (NEW!)"
         ],
         "endpoints": {
             "/api/cost-ratios": "공종별 비율 조회",
@@ -491,14 +448,16 @@ async def root():
             "/api/n2b-decision": "N2B 참여 판정",
             "/api/quick-match/{profile}": "샘플 프로필 매칭",
             "/api/custom-match": "커스텀 조건 매칭",
+            "/api/bid-rate": "낙찰률 조회 (NEW!)",
+            "/api/bid-rate/summary": "전체 공종별 낙찰률 요약 (NEW!)",
             "/api/debug/bid-api": "입찰공고 API 테스트",
-            "/api/debug/price-api": "가격정보 API 테스트"
+            "/api/debug/price-api": "가격정보 API 테스트",
+            "/api/debug/bid-result-api": "낙찰정보 API 테스트 (NEW!)"
         }
     }
 
 @app.get("/api/cost-ratios")
 async def get_cost_ratios():
-    """공종별 원가 비율 조회"""
     return {
         "공종별비율": COST_RATIOS,
         "간접비비율": INDIRECT_RATIOS
@@ -506,14 +465,12 @@ async def get_cost_ratios():
 
 @app.get("/api/cost-ratio/{work_type}")
 async def get_cost_ratio(work_type: str):
-    """특정 공종 비율 조회"""
     if work_type in COST_RATIOS:
         return COST_RATIOS[work_type]
     return {"error": f"공종 '{work_type}' 없음", "available": list(COST_RATIOS.keys())}
 
 @app.post("/api/price-search")
 async def search_prices(req: PriceSearchRequest, request: Request):
-    """자재/시공 단가 검색"""
     ip = get_client_ip(request)
     is_premium = request.headers.get("x-premium-key") == PREMIUM_KEY
     check_rate_limit(ip, "cost", is_premium)
@@ -530,7 +487,6 @@ async def search_prices(req: PriceSearchRequest, request: Request):
 
 @app.post("/api/cost-estimate")
 async def estimate_cost(req: CostEstimateRequest, request: Request):
-    """개략원가 산출"""
     ip = get_client_ip(request)
     is_premium = request.headers.get("x-premium-key") == PREMIUM_KEY
     check_rate_limit(ip, "cost", is_premium)
@@ -547,7 +503,6 @@ async def estimate_cost(req: CostEstimateRequest, request: Request):
 
 @app.post("/api/n2b-decision")
 async def n2b_decision(req: N2BDecisionRequest, request: Request):
-    """N2B 참여 판정"""
     ip = get_client_ip(request)
     is_premium = request.headers.get("x-premium-key") == PREMIUM_KEY
     check_rate_limit(ip, "cost", is_premium)
@@ -571,7 +526,6 @@ async def quick_estimate(
     labor_discount: float = 0,
     equipment_discount: float = 0
 ):
-    """빠른 개략원가 산출 (GET)"""
     result = calculate_rough_cost(
         base_price=base_price,
         work_type=work_type,
@@ -588,7 +542,6 @@ async def quick_decision(
     work_type: str = "기타",
     min_profit_rate: float = 10
 ):
-    """빠른 N2B 판정 (GET)"""
     result = analyze_n2b_decision(
         base_price=base_price,
         estimated_cost=estimated_cost,
@@ -598,7 +551,7 @@ async def quick_decision(
     return result
 
 # ============================================
-# 통합 분석 엔드포인트
+# 통합 분석 엔드포인트 (GET)
 # ============================================
 @app.get("/api/full-analysis")
 async def full_analysis(
@@ -610,11 +563,6 @@ async def full_analysis(
     min_profit_rate: float = 10,
     request: Request = None
 ):
-    """
-    통합 분석: 개략원가 + N2B 판정 + 투찰 전략
-    """
-    
-    # 1. 개략원가 산출
     cost_result = calculate_rough_cost(
         base_price=base_price,
         work_type=work_type,
@@ -625,7 +573,6 @@ async def full_analysis(
     
     estimated_cost = cost_result["실제원가"]["합계"]
     
-    # 2. N2B 판정
     decision_result = analyze_n2b_decision(
         base_price=base_price,
         estimated_cost=estimated_cost,
@@ -633,7 +580,6 @@ async def full_analysis(
         min_profit_rate=min_profit_rate
     )
     
-    # 3. 투찰 전략
     bubble_rate = cost_result["거품률"]
     
     if bubble_rate >= 25:
@@ -661,7 +607,6 @@ async def full_analysis(
 
 @app.get("/api/usage")
 async def get_usage(request: Request):
-    """사용량 조회"""
     ip = get_client_ip(request)
     today = str(date.today())
     is_premium = request.headers.get("x-premium-key") == PREMIUM_KEY
@@ -683,7 +628,6 @@ async def get_usage(request: Request):
 # 입찰공고 조회 (나라장터 API)
 # ============================================
 async def fetch_bid_announcements(keyword: str, bid_type: str = "공사", count: int = 20) -> list:
-    """조달청 입찰공고 조회"""
     type_endpoints = {
         "물품": "getBidPblancListInfoThng",
         "공사": "getBidPblancListInfoCnstwk", 
@@ -694,8 +638,6 @@ async def fetch_bid_announcements(keyword: str, bid_type: str = "공사", count:
     endpoint = type_endpoints.get(bid_type, "getBidPblancListInfoCnstwk")
     url = f"https://apis.data.go.kr/1230000/ad/BidPublicInfoService/{endpoint}"
     
-    # 날짜 범위: 최근 7일 (더 신선한 공고)
-    from datetime import timedelta
     end_date = datetime.now()
     start_date = end_date - timedelta(days=7)
     
@@ -709,39 +651,26 @@ async def fetch_bid_announcements(keyword: str, bid_type: str = "공사", count:
         "inqryEndDt": end_date.strftime("%Y%m%d") + "2359"
     }
     
-    # 키워드 있으면 추가
     if keyword and keyword.strip():
         params["bidNm"] = keyword
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.get(url, params=params)
-            print(f"[조달청 API] URL: {url}")
-            print(f"[조달청 API] Status: {response.status_code}")
-            print(f"[조달청 API] Response: {response.text[:500]}")
             
             response.raise_for_status()
             data = response.json()
             
-            # 응답 구조 확인
             response_data = data.get("response", {})
-            header = response_data.get("header", {})
-            result_code = header.get("resultCode", "")
-            result_msg = header.get("resultMsg", "")
-            
-            print(f"[조달청 API] Result: {result_code} - {result_msg}")
-            
             body = response_data.get("body", {})
             items = body.get("items", [])
             
-            # items가 리스트가 아닐 수 있음
             if isinstance(items, dict):
                 items = items.get("item", [])
             if not isinstance(items, list):
                 items = [items] if items else []
             
             if not items:
-                print(f"[조달청 API] No items found")
                 return []
             
             bids = []
@@ -760,12 +689,11 @@ async def fetch_bid_announcements(keyword: str, bid_type: str = "공사", count:
                     "region": item.get("ntceInsttOfclAddr", ""),
                     "url": item.get("bidNtceDtlUrl", ""),
                     "bid_type": bid_type,
-                    "main_cnstty": item.get("mainCnsttyNm", ""),  # 주공종명 추가!
-                    "cnstty_list": item.get("cnsttyAccotShreRateList", "")  # 공종 목록
+                    "main_cnstty": item.get("mainCnsttyNm", ""),
+                    "cnstty_list": item.get("cnsttyAccotShreRateList", "")
                 }
                 bids.append(bid)
             
-            print(f"[조달청 API] Found {len(bids)} bids")
             return bids
     except Exception as e:
         print(f"[조달청 입찰공고 오류] {e}")
@@ -777,7 +705,6 @@ async def fetch_bid_announcements(keyword: str, bid_type: str = "공사", count:
 # 낙찰정보 조회
 # ============================================
 async def fetch_winning_bids(keyword: str, bid_type: str = "공사", count: int = 20) -> list:
-    """낙찰정보 조회 - 낙찰가율 분석용"""
     type_endpoints = {
         "물품": "getOpengResultListInfoThngPPSSrch",
         "공사": "getOpengResultListInfoCnstwkPPSSrch",
@@ -805,6 +732,14 @@ async def fetch_winning_bids(keyword: str, bid_type: str = "공사", count: int 
             items = data.get("response", {}).get("body", {}).get("items", [])
             if not items:
                 return []
+            # items가 dict일 수 있음
+            if isinstance(items, dict):
+                items = items.get("item", [])
+            if isinstance(items, dict):
+                items = [items]
+            if not isinstance(items, list):
+                items = []
+            
             results = []
             for item in items:
                 estimated = float(item.get("presmptPrce", 0) or 0)
@@ -831,18 +766,17 @@ async def fetch_winning_bids(keyword: str, bid_type: str = "공사", count: int 
 # 회사 프로필 모델
 # ============================================
 class CompanyProfile(BaseModel):
-    """회사 프로필"""
     company_name: str = ""
-    business_type: str = "전문건설"  # 종합건설, 전문건설
-    work_types: List[str] = []  # 주력 공종
-    regions: List[str] = []  # 주력 지역
-    min_price: int = 0  # 최소 희망 금액
-    max_price: int = 10000000000  # 최대 희망 금액
-    licenses: List[str] = []  # 보유 면허
-    experiences: List[str] = []  # 실적 분야
+    business_type: str = "전문건설"
+    work_types: List[str] = []
+    regions: List[str] = []
+    min_price: int = 0
+    max_price: int = 10000000000
+    licenses: List[str] = []
+    experiences: List[str] = []
 
 # ============================================
-# 샘플 회사 프로필 (테스트/데모용)
+# 샘플 회사 프로필
 # ============================================
 SAMPLE_PROFILES = {
     "road": CompanyProfile(
@@ -850,8 +784,8 @@ SAMPLE_PROFILES = {
         business_type="전문건설",
         work_types=["도로", "포장", "아스팔트", "아스콘"],
         regions=["서울", "경기", "인천"],
-        min_price=50000000,      # 5천만원
-        max_price=2000000000,    # 20억
+        min_price=50000000,
+        max_price=2000000000,
         licenses=["도로포장공사업", "비계구조물해체공사업"],
         experiences=["도로포장 50건", "아스팔트포장 30건", "보도블럭 20건"]
     ),
@@ -860,8 +794,8 @@ SAMPLE_PROFILES = {
         business_type="종합건설",
         work_types=["건축", "토목", "도로", "상하수도"],
         regions=["서울", "경기", "인천", "충남", "충북"],
-        min_price=500000000,     # 5억
-        max_price=50000000000,   # 500억
+        min_price=500000000,
+        max_price=50000000000,
         licenses=["토목건축공사업", "토목공사업", "건축공사업"],
         experiences=["공공건축 30건", "도로공사 25건", "하수관로 15건"]
     ),
@@ -870,19 +804,15 @@ SAMPLE_PROFILES = {
         business_type="전문건설",
         work_types=["전기", "통신", "소방", "설비"],
         regions=["서울", "경기"],
-        min_price=30000000,      # 3천만원
-        max_price=1000000000,    # 10억
+        min_price=30000000,
+        max_price=1000000000,
         licenses=["전기공사업", "정보통신공사업", "소방시설공사업"],
         experiences=["전기설비 100건", "통신공사 50건", "소방설비 30건"]
     )
 }
 
-# ============================================
-# 샘플 프로필 조회 API
-# ============================================
 @app.get("/api/sample-profiles")
 async def get_sample_profiles():
-    """샘플 회사 프로필 목록"""
     return {
         "success": True,
         "profiles": {
@@ -904,7 +834,6 @@ async def get_sample_profiles():
 
 @app.get("/api/sample-profiles/{profile_name}")
 async def get_sample_profile(profile_name: str):
-    """특정 샘플 프로필 조회"""
     if profile_name not in SAMPLE_PROFILES:
         raise HTTPException(status_code=404, detail=f"프로필 '{profile_name}' 없음")
     
@@ -928,7 +857,6 @@ async def get_sample_profile(profile_name: str):
 # 커스텀 프로필로 공고 매칭
 # ============================================
 class CustomMatchRequest(BaseModel):
-    """커스텀 매칭 요청"""
     work_types: list = ["도로포장"]
     min_price: int = 50000000
     max_price: int = 2000000000
@@ -938,9 +866,6 @@ class CustomMatchRequest(BaseModel):
 
 @app.post("/api/custom-match")
 async def custom_match(req: CustomMatchRequest):
-    """커스텀 프로필로 공고 매칭"""
-    
-    # 권역 → 시도 변환
     REGION_MAP = {
         "전국": ["전국"],
         "수도권": ["서울", "경기", "인천"],
@@ -950,7 +875,6 @@ async def custom_match(req: CustomMatchRequest):
         "강원제주": ["강원", "제주"]
     }
     
-    # 권역을 시도 목록으로 변환
     expanded_regions = []
     for r in req.regions:
         if r in REGION_MAP:
@@ -958,22 +882,17 @@ async def custom_match(req: CustomMatchRequest):
         else:
             expanded_regions.append(r)
     
-    # 키워드 없으면 업종 첫 번째 사용
     search_keyword = req.keyword if req.keyword else req.work_types[0] if req.work_types else ""
     
-    # 공고 조회
     bids = await fetch_bid_announcements(search_keyword, req.bid_type, 100)
     
-    # 오늘 날짜
     today = datetime.now()
     
-    # 매칭 필터링
     matched = []
     for bid in bids:
         score = 0
         reasons = []
         
-        # 마감일 필터 (오늘 마감 포함)
         deadline = bid.get("deadline", "")
         if deadline:
             try:
@@ -986,7 +905,6 @@ async def custom_match(req: CustomMatchRequest):
             except:
                 pass
         
-        # 금액 필터
         price = bid.get("base_price", 0) or bid.get("estimated_price", 0)
         if price:
             price = int(price)
@@ -996,7 +914,6 @@ async def custom_match(req: CustomMatchRequest):
             else:
                 continue
         
-        # 공종 매칭 (주공종명 + 공고명에서 검색)
         bid_name = bid.get("bid_name", "")
         main_cnstty = bid.get("main_cnstty", "")
         cnstty_list = bid.get("cnstty_list", "")
@@ -1014,11 +931,9 @@ async def custom_match(req: CustomMatchRequest):
         if work_type_matched:
             reasons.append(f"공종: {matched_work_type}" + (f" ({main_cnstty})" if main_cnstty else ""))
         
-        # 공종 매칭 없으면 제외
         if not work_type_matched:
             continue
         
-        # 지역 매칭 (변환된 시도 목록으로)
         region = bid.get("region", "") or bid.get("agency", "")
         region_matched = False
         if "전국" in expanded_regions:
@@ -1039,7 +954,6 @@ async def custom_match(req: CustomMatchRequest):
         if score >= 25:
             matched.append(bid)
     
-    # 마감일 가까운 순으로 정렬
     matched.sort(key=lambda x: (x.get("deadline", "9999"), -x.get("match_score", 0)))
     
     return {
@@ -1064,42 +978,33 @@ async def custom_match(req: CustomMatchRequest):
 # ============================================
 @app.get("/api/quick-match/{profile_name}")
 async def quick_match(profile_name: str, keyword: str = "", bid_type: str = "공사", request: Request = None):
-    """샘플 프로필로 즉시 매칭"""
     if profile_name not in SAMPLE_PROFILES:
         raise HTTPException(status_code=404, detail=f"프로필 '{profile_name}' 없음")
     
     profile = SAMPLE_PROFILES[profile_name]
-    
-    # 키워드 없으면 주력 공종 첫 번째 사용
     search_keyword = keyword if keyword else profile.work_types[0] if profile.work_types else ""
     
-    # 공고 조회 (100건으로 늘림)
     bids = await fetch_bid_announcements(search_keyword, bid_type, 100)
     
-    # 오늘 날짜
     today = datetime.now()
     
-    # 매칭 필터링
     matched = []
     for bid in bids:
         score = 0
         reasons = []
         
-        # 마감일 필터 (오늘 마감 포함)
         deadline = bid.get("deadline", "")
         if deadline:
             try:
                 deadline_clean = deadline.replace("-", "").replace(" ", "").replace(":", "")
                 if len(deadline_clean) >= 8:
                     deadline_date = datetime.strptime(deadline_clean[:8], "%Y%m%d")
-                    # 어제 이전 마감이면 제외 (오늘 마감은 포함)
                     yesterday = today - timedelta(days=1)
                     if deadline_date < yesterday:
                         continue
             except:
-                pass  # 날짜 파싱 실패시 일단 포함
+                pass
         
-        # 금액 필터
         price = bid.get("base_price", 0) or bid.get("estimated_price", 0)
         if price:
             price = int(price)
@@ -1109,12 +1014,9 @@ async def quick_match(profile_name: str, keyword: str = "", bid_type: str = "공
             else:
                 continue
         
-        # 공종 매칭 (주공종명 + 공고명에서 검색)
         bid_name = bid.get("bid_name", "")
-        main_cnstty = bid.get("main_cnstty", "")  # 예: "도로포장공사업"
-        cnstty_list = bid.get("cnstty_list", "")  # 예: "[도로포장공사업^100]"
-        
-        # 검색 대상 텍스트 합치기
+        main_cnstty = bid.get("main_cnstty", "")
+        cnstty_list = bid.get("cnstty_list", "")
         search_text = f"{bid_name} {main_cnstty} {cnstty_list}"
         
         work_type_matched = False
@@ -1129,11 +1031,9 @@ async def quick_match(profile_name: str, keyword: str = "", bid_type: str = "공
         if work_type_matched:
             reasons.append(f"공종: {matched_work_type} ({main_cnstty})" if main_cnstty else f"공종: {matched_work_type}")
         
-        # 공종 매칭 없으면 제외
         if not work_type_matched:
             continue
         
-        # 지역 매칭
         region = bid.get("region", "") or bid.get("agency", "")
         for r in profile.regions:
             if r in region:
@@ -1147,7 +1047,6 @@ async def quick_match(profile_name: str, keyword: str = "", bid_type: str = "공
         if score >= 25:
             matched.append(bid)
     
-    # 마감일 가까운 순으로 정렬
     matched.sort(key=lambda x: (x.get("deadline", "9999"), -x.get("match_score", 0)))
     
     return {
@@ -1158,7 +1057,7 @@ async def quick_match(profile_name: str, keyword: str = "", bid_type: str = "공
         "total_found": len(bids),
         "matched_count": len(matched),
         "match_rate": round(len(matched) / len(bids) * 100, 1) if bids else 0,
-        "matched": matched[:20],  # 상위 20개
+        "matched": matched[:20],
         "debug": {
             "work_types": profile.work_types,
             "price_range": f"{profile.min_price:,} ~ {profile.max_price:,}",
@@ -1179,18 +1078,13 @@ async def quick_match(profile_name: str, keyword: str = "", bid_type: str = "공
     }
 
 class BidSearchRequest(BaseModel):
-    """입찰공고 검색 요청"""
     keyword: str = ""
     bid_type: str = "공사"
     count: int = 20
     profile: Optional[CompanyProfile] = None
 
-# ============================================
-# 입찰공고 검색 API
-# ============================================
 @app.post("/api/bid-search")
 async def search_bids(req: BidSearchRequest, request: Request):
-    """입찰공고 검색"""
     ip = get_client_ip(request)
     is_premium = request.headers.get("x-premium-key") == PREMIUM_KEY
     check_rate_limit(ip, "bid", is_premium)
@@ -1212,7 +1106,6 @@ async def search_bids_get(
     count: int = 20,
     request: Request = None
 ):
-    """입찰공고 검색 (GET)"""
     bids = await fetch_bid_announcements(keyword, bid_type, count)
     
     return {
@@ -1223,17 +1116,12 @@ async def search_bids_get(
         "bids": bids
     }
 
-# ============================================
-# 회사-공고 매칭 API
-# ============================================
 @app.post("/api/bid-match")
 async def match_bids(req: BidSearchRequest, request: Request):
-    """회사 프로필 기반 공고 매칭"""
     ip = get_client_ip(request)
     is_premium = request.headers.get("x-premium-key") == PREMIUM_KEY
     check_rate_limit(ip, "bid", is_premium)
     
-    # 공고 조회
     bids = await fetch_bid_announcements(req.keyword, req.bid_type, req.count)
     
     if not req.profile:
@@ -1245,16 +1133,13 @@ async def match_bids(req: BidSearchRequest, request: Request):
             "message": "프로필 없음 - 전체 공고 반환"
         }
     
-    # 오늘 날짜
     today = datetime.now()
     
-    # 매칭 필터링
     matched = []
     for bid in bids:
         score = 0
         reasons = []
         
-        # 마감일 필터 (오늘 마감 포함)
         deadline = bid.get("deadline", "")
         if deadline:
             try:
@@ -1267,7 +1152,6 @@ async def match_bids(req: BidSearchRequest, request: Request):
             except:
                 pass
         
-        # 금액 필터
         price = bid.get("base_price", 0) or bid.get("estimated_price", 0)
         if price:
             price = int(price)
@@ -1275,9 +1159,8 @@ async def match_bids(req: BidSearchRequest, request: Request):
                 score += 30
                 reasons.append("금액 적합")
             else:
-                continue  # 금액 범위 벗어나면 제외
+                continue
         
-        # 공종 매칭 (주공종명 + 공고명에서 검색)
         bid_name = bid.get("bid_name", "")
         main_cnstty = bid.get("main_cnstty", "")
         cnstty_list = bid.get("cnstty_list", "")
@@ -1295,11 +1178,9 @@ async def match_bids(req: BidSearchRequest, request: Request):
         if work_type_matched:
             reasons.append(f"공종: {matched_work_type} ({main_cnstty})" if main_cnstty else f"공종: {matched_work_type}")
         
-        # 공종 매칭 없으면 제외
         if not work_type_matched:
             continue
         
-        # 지역 매칭
         region = bid.get("region", "") or bid.get("agency", "")
         for r in req.profile.regions:
             if r in region:
@@ -1307,14 +1188,12 @@ async def match_bids(req: BidSearchRequest, request: Request):
                 reasons.append(f"지역 매칭: {r}")
                 break
         
-        # 매칭 점수 추가
         bid["match_score"] = score
         bid["match_reasons"] = reasons
         
-        if score >= 25:  # 최소 25점 이상
+        if score >= 25:
             matched.append(bid)
     
-    # 마감일 가까운 순 정렬
     matched.sort(key=lambda x: (x.get("deadline", "9999"), -x.get("match_score", 0)))
     
     return {
@@ -1340,14 +1219,13 @@ async def get_winning_rate(
     count: int = 30,
     request: Request = None
 ):
-    """낙찰가율 분석 - 평균 낙찰가율 제공"""
     results = await fetch_winning_bids(keyword, bid_type, count)
     
     if not results:
         return {
             "success": False,
             "message": "낙찰 데이터 없음",
-            "avg_rate": 87.5,  # 기본값
+            "avg_rate": 87.5,
             "data": []
         }
     
@@ -1362,14 +1240,14 @@ async def get_winning_rate(
         "min_rate": round(min(rates), 2) if rates else 0,
         "max_rate": round(max(rates), 2) if rates else 0,
         "recommendation": f"투찰가율 {avg_rate - 0.5:.1f}% ~ {avg_rate + 0.5:.1f}% 권장",
-        "data": results[:10]  # 상위 10개만
+        "data": results[:10]
     }
 
 # ============================================
-# 통합 분석 API (공고 + 원가 + N2B)
+# 통합 분석 API (POST - 공고 + 원가 + N2B)
 # ============================================
 @app.post("/api/full-analysis")
-async def full_analysis(
+async def full_analysis_post(
     bid_no: str,
     base_price: int,
     work_type: str = "기타",
@@ -1379,9 +1257,6 @@ async def full_analysis(
     min_profit_rate: float = 5.0,
     request: Request = None
 ):
-    """통합 분석: 공고 + 원가분석 + N2B 판정"""
-    
-    # 1. 원가분석
     ratios = COST_RATIOS.get(work_type, COST_RATIOS["기타"])
     
     direct_cost = int(base_price * 0.74)
@@ -1389,20 +1264,16 @@ async def full_analysis(
     labor = int(direct_cost * ratios["노무비"] / 100)
     equipment = int(direct_cost * ratios["경비"] / 100)
     
-    # 절감 적용
     actual_material = int(material * (1 - material_discount / 100))
     actual_labor = int(labor * (1 - labor_discount / 100))
     actual_equipment = int(equipment * (1 - equipment_discount / 100))
     actual_direct = actual_material + actual_labor + actual_equipment
     
-    # 간접비
     indirect = int(actual_direct * 0.26 / 0.74)
     actual_total = actual_direct + indirect
     
-    # 거품률
     bubble_rate = round((1 - actual_total / base_price) * 100, 1)
     
-    # 2. N2B 판정
     if bubble_rate >= 20:
         decision = "적극 참여"
         score = 95
@@ -1419,7 +1290,6 @@ async def full_analysis(
         decision = "참여 불가"
         score = 30
     
-    # 3. 투찰 전략
     recommend_rate = round(100 - bubble_rate + min_profit_rate, 1)
     recommend_price = int(base_price * recommend_rate / 100)
     expected_profit = int(recommend_price - actual_total)
@@ -1458,12 +1328,10 @@ async def full_analysis(
     }
 
 # ============================================
-# 디버그 API - 조달청 API 직접 테스트
+# 디버그 API
 # ============================================
 @app.get("/api/debug/bid-api")
 async def debug_bid_api(keyword: str = "", bid_type: str = "공사"):
-    """조달청 API 직접 테스트 (디버그용)"""
-    
     type_endpoints = {
         "물품": "getBidPblancListInfoThng",
         "공사": "getBidPblancListInfoCnstwk", 
@@ -1494,7 +1362,6 @@ async def debug_bid_api(keyword: str = "", bid_type: str = "공사"):
             response = await client.get(url, params=params)
             data = response.json() if response.status_code == 200 else None
             
-            # 공고 건수 추출
             total_count = 0
             if data:
                 total_count = data.get("response", {}).get("body", {}).get("totalCount", 0)
@@ -1518,9 +1385,6 @@ async def debug_bid_api(keyword: str = "", bid_type: str = "공사"):
 
 @app.get("/api/debug/price-api")
 async def debug_price_api(keyword: str = "복공판"):
-    """가격정보 API 직접 테스트 (디버그용)"""
-    
-    # 올바른 엔드포인트 테스트
     url = "https://apis.data.go.kr/1230000/ao/PriceInfoService/getPriceInfoListFcltyCmmnMtrilEngrk"
     
     params = {
@@ -1549,7 +1413,88 @@ async def debug_price_api(keyword: str = "복공판"):
 
 
 # ============================================
+# 낙찰정보 API 디버그 (NEW!)
+# ============================================
+@app.get("/api/debug/bid-result-api")
+async def debug_bid_result_api(bid_type: str = "공사", keyword: str = ""):
+    """조달청 낙찰정보서비스 API 직접 테스트"""
+    
+    # 낙찰정보 엔드포인트
+    url = "https://apis.data.go.kr/1230000/as/ScsbidInfoService/getOpengResultListInfoCnstwk01"
+    
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=180)
+    
+    params = {
+        "ServiceKey": PUBLIC_DATA_API_KEY,
+        "pageNo": 1,
+        "numOfRows": 10,
+        "type": "json",
+        "inqryDiv": "1",
+        "inqryBgnDt": start_date.strftime("%Y%m%d") + "0000",
+        "inqryEndDt": end_date.strftime("%Y%m%d") + "2359"
+    }
+    
+    if keyword:
+        params["bidNtceNm"] = keyword
+    
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(url, params=params)
+            data = response.json() if response.status_code == 200 else None
+            
+            total_count = 0
+            sample_items = []
+            field_names = []
+            
+            if data:
+                body = data.get("response", {}).get("body", {})
+                total_count = body.get("totalCount", 0)
+                items = body.get("items", [])
+                
+                # items 정규화
+                if isinstance(items, dict):
+                    items = items.get("item", [])
+                if isinstance(items, dict):
+                    items = [items]
+                if not isinstance(items, list):
+                    items = []
+                
+                # 첫 번째 아이템의 필드명 추출
+                if items:
+                    field_names = list(items[0].keys())
+                    
+                    # 샘플 아이템에서 핵심 필드만 추출
+                    for item in items[:3]:
+                        sample_items.append({
+                            "bidNtceNm": item.get("bidNtceNm", ""),
+                            "presmptPrce": item.get("presmptPrce", ""),
+                            "sucsfbidAmt": item.get("sucsfbidAmt", ""),
+                            "sucsBidLwetRate": item.get("sucsBidLwetRate", ""),
+                            "sucsfbidCorpNm": item.get("sucsfbidCorpNm", ""),
+                            "bidNtceNo": item.get("bidNtceNo", ""),
+                            "opengDt": item.get("opengDt", ""),
+                        })
+            
+            return {
+                "url": url,
+                "status_code": response.status_code,
+                "total_count": total_count,
+                "field_names": field_names,
+                "sample_items": sample_items,
+                "api_key_preview": PUBLIC_DATA_API_KEY[:10] + "...",
+                "response_preview": response.text[:1000]
+            }
+    except Exception as e:
+        return {
+            "url": url,
+            "error": str(e)
+        }
+
+
+# ============================================
 # 낙찰률 조회 API - 조달청 낙찰정보서비스
+# ★★★ 수정됨: 실제 API 응답 필드명에 맞춤 ★★★
 # ============================================
 @app.get("/api/bid-rate")
 async def get_bid_rate(
@@ -1596,23 +1541,47 @@ async def get_bid_rate(
             response = await client.get(url, params=params)
             
             if response.status_code != 200:
-                # API 실패 시 기본값 반환
-                return get_default_bid_rate(work_type, min_price, max_price)
+                return get_default_bid_rate(work_type, min_price, max_price, error=f"API status: {response.status_code}")
             
             data = response.json()
-            items = data.get("response", {}).get("body", {}).get("items", [])
+            body = data.get("response", {}).get("body", {})
+            items = body.get("items", [])
+            
+            # ★ items 정규화 (dict → list 변환)
+            if isinstance(items, dict):
+                items = items.get("item", [])
+            if isinstance(items, dict):
+                items = [items]
+            if not isinstance(items, list):
+                items = []
             
             if not items:
-                return get_default_bid_rate(work_type, min_price, max_price)
+                return get_default_bid_rate(work_type, min_price, max_price, error="No items in response")
             
             for item in items:
                 try:
-                    bid_name = item.get("bidNm", "")
-                    base_price = int(item.get("bssamt", 0) or 0)
-                    bid_price = int(item.get("sucsfbidAmt", 0) or item.get("bidprc", 0) or 0)
+                    # ★★★ 실제 API 필드명으로 수정 ★★★
+                    bid_name = item.get("bidNtceNm", "") or item.get("bidNm", "")
+                    
+                    # 추정가격 (presmptPrce)
+                    base_price_val = item.get("presmptPrce", 0)
+                    try:
+                        base_price_val = int(float(base_price_val or 0))
+                    except:
+                        base_price_val = 0
+                    
+                    # 낙찰금액 (sucsfbidAmt)
+                    bid_price_val = item.get("sucsfbidAmt", 0)
+                    try:
+                        bid_price_val = int(float(bid_price_val or 0))
+                    except:
+                        bid_price_val = 0
+                    
+                    # 낙찰하한율 (sucsBidLwetRate) - 직접 제공되는 경우
+                    direct_rate = item.get("sucsBidLwetRate", None)
                     
                     # 필터링: 금액 범위
-                    if base_price < min_price or base_price > max_price:
+                    if base_price_val > 0 and (base_price_val < min_price or base_price_val > max_price):
                         continue
                     
                     # 필터링: 공종 키워드
@@ -1620,20 +1589,32 @@ async def get_bid_rate(
                         continue
                     
                     # 낙찰률 계산
-                    if base_price > 0 and bid_price > 0:
-                        rate = (bid_price / base_price) * 100
-                        if 70 <= rate <= 100:  # 유효한 범위만
-                            bid_rates.append({
-                                "name": bid_name[:50],
-                                "base_price": base_price,
-                                "bid_price": bid_price,
-                                "rate": round(rate, 2)
-                            })
-                except:
+                    rate = 0
+                    if direct_rate:
+                        # API에서 직접 낙찰률을 제공하는 경우
+                        try:
+                            rate = float(direct_rate)
+                        except:
+                            rate = 0
+                    elif base_price_val > 0 and bid_price_val > 0:
+                        # 직접 계산
+                        rate = (bid_price_val / base_price_val) * 100
+                    
+                    if 70 <= rate <= 100:
+                        bid_rates.append({
+                            "name": bid_name[:50],
+                            "base_price": base_price_val,
+                            "bid_price": bid_price_val,
+                            "rate": round(rate, 2),
+                            "source": "API직접" if direct_rate else "계산"
+                        })
+                except Exception as item_err:
+                    print(f"[bid-rate] Item parse error: {item_err}")
                     continue
             
             if not bid_rates:
-                return get_default_bid_rate(work_type, min_price, max_price)
+                return get_default_bid_rate(work_type, min_price, max_price, 
+                                           error=f"No matching data (total items: {len(items)}, keywords: {keywords})")
             
             # 평균 계산
             avg_rate = sum(r["rate"] for r in bid_rates) / len(bid_rates)
@@ -1648,8 +1629,12 @@ async def get_bid_rate(
                 "avg_bid_rate": round(avg_rate, 2),
                 "min_bid_rate": round(min_rate, 2),
                 "max_bid_rate": round(max_rate, 2),
-                "samples": bid_rates[:10],  # 상위 10개 샘플
-                "source": "조달청 낙찰정보서비스"
+                "samples": bid_rates[:10],
+                "source": "조달청 낙찰정보서비스",
+                "경쟁가": {
+                    "설명": "경쟁가 = 기초금액 × 평균 낙찰률",
+                    "평균낙찰률": f"{round(avg_rate, 2)}%"
+                }
             }
             
     except Exception as e:
@@ -1659,7 +1644,6 @@ async def get_bid_rate(
 def get_default_bid_rate(work_type: str, min_price: int, max_price: int, error: str = None):
     """기본 낙찰률 (API 실패 시 또는 데이터 부족 시)"""
     
-    # 공종별 경험적 평균 낙찰률
     default_rates = {
         "도로": 84.5,
         "토목": 83.2,
@@ -1671,10 +1655,9 @@ def get_default_bid_rate(work_type: str, min_price: int, max_price: int, error: 
         "기타": 85.0
     }
     
-    # 금액대별 보정 (소규모일수록 경쟁 치열)
-    if max_price <= 100000000:  # 1억 이하
+    if max_price <= 100000000:
         adjustment = -1.5
-    elif max_price <= 500000000:  # 5억 이하
+    elif max_price <= 500000000:
         adjustment = -0.5
     else:
         adjustment = 0.5
@@ -1718,7 +1701,7 @@ async def get_bid_rate_summary():
     return {
         "summary": results,
         "updated": datetime.now().isoformat(),
-        "note": "낙찰률 = 낙찰금액 / 기초금액 × 100%"
+        "note": "낙찰률 = 낙찰금액 / 기초금액 × 100% (= 경쟁가율)"
     }
 
 
