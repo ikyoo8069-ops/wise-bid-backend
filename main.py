@@ -1589,53 +1589,50 @@ async def get_bid_rate(
             
             for item in items:
                 try:
-                    # ★★★ 실제 API 필드명으로 수정 ★★★
+                    # ★★★ 실제 API 필드명 ★★★
                     bid_name = item.get("bidNtceNm", "") or item.get("bidNm", "")
                     
-                    # 추정가격 (presmptPrce)
-                    base_price_val = item.get("presmptPrce", 0)
-                    try:
-                        base_price_val = int(float(base_price_val or 0))
-                    except:
-                        base_price_val = 0
-                    
-                    # 낙찰금액 (sucsfbidAmt)
+                    # 낙찰금액
                     bid_price_val = item.get("sucsfbidAmt", 0)
                     try:
                         bid_price_val = int(float(bid_price_val or 0))
                     except:
                         bid_price_val = 0
                     
-                    # 낙찰하한율 (sucsBidLwetRate) - 직접 제공되는 경우
-                    direct_rate = item.get("sucsBidLwetRate", None)
+                    # ★ 낙찰률 - sucsfbidRate 필드 (실제 API 제공 필드!)
+                    direct_rate = item.get("sucsfbidRate", None) or item.get("sucsBidLwetRate", None)
                     
-                    # 필터링: 금액 범위
+                    # 추정가격 (있으면 금액 필터링용)
+                    base_price_val = item.get("presmptPrce", 0)
+                    try:
+                        base_price_val = int(float(base_price_val or 0))
+                    except:
+                        base_price_val = 0
+                    
+                    # 금액 범위 필터 (추정가격이 있는 경우만)
                     if base_price_val > 0 and (base_price_val < min_price or base_price_val > max_price):
-                        continue
-                    
-                    # 필터링: 공종 키워드
-                    if not any(kw in bid_name for kw in keywords):
                         continue
                     
                     # 낙찰률 계산
                     rate = 0
                     if direct_rate:
-                        # API에서 직접 낙찰률을 제공하는 경우
                         try:
                             rate = float(direct_rate)
                         except:
                             rate = 0
                     elif base_price_val > 0 and bid_price_val > 0:
-                        # 직접 계산
                         rate = (bid_price_val / base_price_val) * 100
                     
                     if 70 <= rate <= 100:
+                        # 키워드 매칭 여부 표시 (매칭되면 우선)
+                        is_keyword_match = any(kw in bid_name for kw in keywords)
                         bid_rates.append({
                             "name": bid_name[:50],
                             "base_price": base_price_val,
                             "bid_price": bid_price_val,
                             "rate": round(rate, 2),
-                            "source": "API직접" if direct_rate else "계산"
+                            "source": "API직접" if direct_rate else "계산",
+                            "keyword_match": is_keyword_match
                         })
                 except Exception as item_err:
                     print(f"[bid-rate] Item parse error: {item_err}")
@@ -1643,23 +1640,28 @@ async def get_bid_rate(
             
             if not bid_rates:
                 return get_default_bid_rate(work_type, min_price, max_price, 
-                                           error=f"No matching data (total items: {len(items)}, keywords: {keywords})")
+                                           error=f"No valid rates (total items: {len(items)})")
+            
+            # 키워드 매칭된 데이터가 있으면 우선 사용
+            keyword_matched = [r for r in bid_rates if r.get("keyword_match")]
+            use_rates = keyword_matched if len(keyword_matched) >= 3 else bid_rates
+            data_source = "공종매칭" if keyword_matched and use_rates == keyword_matched else "전체공사"
             
             # 평균 계산
-            avg_rate = sum(r["rate"] for r in bid_rates) / len(bid_rates)
-            min_rate = min(r["rate"] for r in bid_rates)
-            max_rate = max(r["rate"] for r in bid_rates)
+            avg_rate = sum(r["rate"] for r in use_rates) / len(use_rates)
+            min_rate = min(r["rate"] for r in use_rates)
+            max_rate = max(r["rate"] for r in use_rates)
             
             return {
                 "work_type": work_type,
                 "period": f"최근 {days}일",
                 "price_range": f"{min_price//10000000}천만원 ~ {max_price//10000000}천만원",
-                "sample_count": len(bid_rates),
+                "sample_count": len(use_rates),
                 "avg_bid_rate": round(avg_rate, 2),
                 "min_bid_rate": round(min_rate, 2),
                 "max_bid_rate": round(max_rate, 2),
-                "samples": bid_rates[:10],
-                "source": "조달청 낙찰정보서비스",
+                "samples": sorted(use_rates, key=lambda x: x["rate"])[:10],
+                "source": f"조달청 낙찰정보 ({data_source}, {len(keyword_matched)}건 키워드매칭 / {len(bid_rates)}건 전체)",
                 "경쟁가": {
                     "설명": "경쟁가 = 기초금액 × 평균 낙찰률",
                     "평균낙찰률": f"{round(avg_rate, 2)}%"
@@ -1747,3 +1749,4 @@ async def get_bid_rate_summary():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=10000)
+    
