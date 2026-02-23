@@ -940,6 +940,24 @@ class CustomMatchRequest(BaseModel):
 async def custom_match(req: CustomMatchRequest):
     """커스텀 프로필로 공고 매칭"""
     
+    # 권역 → 시도 변환
+    REGION_MAP = {
+        "전국": ["전국"],
+        "수도권": ["서울", "경기", "인천"],
+        "충청권": ["대전", "세종", "충북", "충남"],
+        "영남권": ["부산", "대구", "울산", "경북", "경남"],
+        "호남권": ["광주", "전북", "전남"],
+        "강원제주": ["강원", "제주"]
+    }
+    
+    # 권역을 시도 목록으로 변환
+    expanded_regions = []
+    for r in req.regions:
+        if r in REGION_MAP:
+            expanded_regions.extend(REGION_MAP[r])
+        else:
+            expanded_regions.append(r)
+    
     # 키워드 없으면 업종 첫 번째 사용
     search_keyword = req.keyword if req.keyword else req.work_types[0] if req.work_types else ""
     
@@ -1000,15 +1018,15 @@ async def custom_match(req: CustomMatchRequest):
         if not work_type_matched:
             continue
         
-        # 지역 매칭
+        # 지역 매칭 (변환된 시도 목록으로)
         region = bid.get("region", "") or bid.get("agency", "")
         region_matched = False
-        if "전국" in req.regions:
+        if "전국" in expanded_regions:
             region_matched = True
             score += 20
             reasons.append("지역: 전국")
         else:
-            for r in req.regions:
+            for r in expanded_regions:
                 if r in region:
                     score += 20
                     reasons.append(f"지역: {r}")
