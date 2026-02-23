@@ -55,7 +55,19 @@ COST_RATIOS = {
     "포장": {"재료비": 55, "노무비": 25, "경비": 20, "description": "포장 전문"},
     "철근콘크리트": {"재료비": 50, "노무비": 35, "경비": 15, "description": "RC 구조물"},
     "철골": {"재료비": 60, "노무비": 25, "경비": 15, "description": "철골 구조물"},
-    "기타": {"재료비": 50, "노무비": 30, "경비": 20, "description": "일반 공사"}
+    "기타": {"재료비": 50, "노무비": 30, "경비": 20, "description": "일반 공사"},
+    # 용역
+    "설계": {"재료비": 10, "노무비": 65, "경비": 25, "description": "설계용역", "category": "용역"},
+    "감리": {"재료비": 10, "노무비": 65, "경비": 25, "description": "감리용역", "category": "용역"},
+    "엔지니어링": {"재료비": 15, "노무비": 60, "경비": 25, "description": "엔지니어링", "category": "용역"},
+    "SW개발": {"재료비": 15, "노무비": 60, "경비": 25, "description": "소프트웨어 개발", "category": "용역"},
+    "시설관리": {"재료비": 20, "노무비": 55, "경비": 25, "description": "시설관리/청소", "category": "용역"},
+    "일반용역": {"재료비": 15, "노무비": 60, "경비": 25, "description": "일반 용역", "category": "용역"},
+    # 물품
+    "전산장비": {"재료비": 75, "노무비": 10, "경비": 15, "description": "전산장비/IT", "category": "물품"},
+    "사무용품": {"재료비": 70, "노무비": 10, "경비": 20, "description": "사무용품/소모품", "category": "물품"},
+    "자재": {"재료비": 75, "노무비": 10, "경비": 15, "description": "건축/전기 자재", "category": "물품"},
+    "일반물품": {"재료비": 70, "노무비": 10, "경비": 20, "description": "일반 물품", "category": "물품"}
 }
 
 # 간접비 비율 (직접공사비 대비)
@@ -439,7 +451,7 @@ async def root():
             "N2B 참여 판정",
             "입찰공고 조회/매칭",
             "회사 프로필 매칭",
-            "낙찰률 조회 API (NEW!)"
+            "낙찰률 조회 API - 공사/용역/물품 (NEW!)"
         ],
         "endpoints": {
             "/api/cost-ratios": "공종별 비율 조회",
@@ -1513,13 +1525,30 @@ async def get_bid_rate(
         "전기": ["전기", "조명", "배선", "통신"],
         "설비": ["설비", "기계", "배관", "소방"],
         "조경": ["조경", "식재", "녹지", "공원"],
-        "상하수도": ["상하수도", "관로", "배수", "급수"]
+        "상하수도": ["상하수도", "관로", "배수", "급수"],
+        "설계": ["설계", "기본설계", "실시설계"],
+        "감리": ["감리", "건설사업관리", "CM"],
+        "엔지니어링": ["엔지니어링", "기술용역", "조사"],
+        "SW개발": ["소프트웨어", "SW", "정보시스템", "전산"],
+        "시설관리": ["시설관리", "청소", "경비", "위탁"],
+        "일반용역": ["용역"],
+        "전산장비": ["전산", "컴퓨터", "서버", "네트워크"],
+        "사무용품": ["사무", "용품", "소모품"],
+        "자재": ["자재", "건축자재", "전기자재"],
+        "일반물품": ["물품", "납품"]
     }
     
     keywords = work_type_keywords.get(work_type, [work_type])
     
-    # 조달청 낙찰정보서비스 API
-    url = "https://apis.data.go.kr/1230000/as/ScsbidInfoService/getOpengResultListInfoCnstwk01"
+    # 조달청 낙찰정보서비스 API - 업무별 엔드포인트
+    bid_category = COST_RATIOS.get(work_type, {}).get("category", "공사")
+    endpoint_map = {
+        "공사": "getOpengResultListInfoCnstwk01",
+        "용역": "getOpengResultListInfoServc01",
+        "물품": "getOpengResultListInfoThng01"
+    }
+    api_endpoint = endpoint_map.get(bid_category, "getOpengResultListInfoCnstwk01")
+    url = f"https://apis.data.go.kr/1230000/as/ScsbidInfoService/{api_endpoint}"
     
     end_date = datetime.now()
     start_date = end_date - timedelta(days=days)
@@ -1652,6 +1681,16 @@ def get_default_bid_rate(work_type: str, min_price: int, max_price: int, error: 
         "설비": 84.8,
         "조경": 83.7,
         "상하수도": 84.2,
+        "설계": 88.5,
+        "감리": 87.8,
+        "엔지니어링": 88.0,
+        "SW개발": 89.2,
+        "시설관리": 86.5,
+        "일반용역": 87.5,
+        "전산장비": 90.5,
+        "사무용품": 91.0,
+        "자재": 89.5,
+        "일반물품": 90.0,
         "기타": 85.0
     }
     
@@ -1687,7 +1726,7 @@ def get_default_bid_rate(work_type: str, min_price: int, max_price: int, error: 
 async def get_bid_rate_summary():
     """전체 공종별 평균 낙찰률 요약"""
     
-    work_types = ["도로", "토목", "건축", "전기", "설비", "조경", "상하수도"]
+    work_types = ["도로", "토목", "건축", "전기", "설비", "조경", "상하수도", "설계", "감리", "SW개발", "전산장비"]
     results = {}
     
     for wt in work_types:
